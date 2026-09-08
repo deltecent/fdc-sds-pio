@@ -125,7 +125,11 @@ esp_err_t net_wifi_enable(bool enabled)
     /* Pick the strongest AP when an SSID is meshed across several (DESIGN.md §9.1). */
     wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-    wc.sta.threshold.authmode = WIFI_AUTH_OPEN; /* accept open..WPA2 */
+    /* Minimum AP security. With a password, require WPA2 so we can't be lured onto an
+     * open/WEP "evil-twin" AP advertising our SSID; a blank password means a genuinely
+     * open network. Setting this explicitly also stops the driver auto-raising it from
+     * OPEN and logging a warning every connect. */
+    wc.sta.threshold.authmode = cfg->wifi_pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (err != ESP_OK) {
