@@ -121,5 +121,7 @@ static void console_task(void *arg)
 
 void net_console_start(void)
 {
-    xTaskCreatePinnedToCore(console_task, "netcon", 4096, NULL, 5, NULL, 0);
+    /* 8 KB: a command dispatched here (e.g. TNFS copy) runs the same deep network +
+     * file-I/O paths as the serial CLI (M9). */
+    xTaskCreatePinnedToCore(console_task, "netcon", 8192, NULL, 5, NULL, 0);
 }

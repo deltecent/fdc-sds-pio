@@ -35,6 +35,7 @@
 #include "net.h"
 #include "ota.h"
 #include "sd.h"
+#include "tnfs.h"
 #include "version.h"
 #include "wildcard.h"
 
@@ -456,61 +457,126 @@ static int cmd_rename(cli_console_t *c, int argc, char **argv)
     return 0;
 }
 
+/*
+ * copy <src> <dst> — stream a whole file between the SD root and/or a TNFS server
+ * (DESIGN.md §10.2). Either endpoint may be a tnfs://host/path URL; an endpoint
+ * without that prefix is an SD-root filename. All four combinations work (SD↔SD,
+ * pull, push, remote↔remote). Streaming is chunked so neither the SD nor the FDC
+ * path is starved (§5.2): each iteration is a bounded read + write, holding no lock
+ * across the transfer. A remote source is bounded by its STAT size; a local source
+ * runs to EOF.
+ */
 static int cmd_copy(cli_console_t *c, int argc, char **argv)
 {
     if (argc < 3) {
         cli_write(c, "usage: copy <src> <dst>\r\n");
         return 1;
     }
-    char src[16 + CONFIG_FILE_CAP];
-    char dst[16 + CONFIG_FILE_CAP];
-    if (!resolve(c, argv[1], src, sizeof src) ||
-        !resolve(c, argv[2], dst, sizeof dst)) {
+    bool src_remote = tnfs_is_url(argv[1]);
+    bool dst_remote = tnfs_is_url(argv[2]);
+    if ((src_remote || dst_remote) && !net_is_connected()) {
+        cli_write(c, "copy: WiFi not connected\r\n");
         return 1;
     }
 
-    FILE *in = fopen(src, "rb");
-    if (!in) {
-        cli_printf(c, "%s: %s\r\n", argv[1], strerror(errno));
-        return 1;
-    }
-    FILE *out = fopen(dst, "wb");
-    if (!out) {
-        cli_printf(c, "%s: %s\r\n", argv[2], strerror(errno));
-        fclose(in);
-        return 1;
-    }
-
-    /*
-     * Chunked copy. When the FDC engine + shared SD mutex land (M3/M4), long
-     * copies must release the mutex per chunk so the ~1 s FDC timeout is never
-     * breached (DESIGN.md §5.2, replacing the old fdc-pump-during-copy hack).
-     */
-    char buf[512];
-    uint32_t copied = 0;
-    size_t n;
-    bool ok = true;
-    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            cli_printf(c, "copy: write error: %s\r\n", strerror(errno));
-            ok = false;
-            break;
+    /* Open source. */
+    FILE *sin = NULL;
+    tnfs_file_t *rin = NULL;
+    uint32_t total = 0;
+    if (src_remote) {
+        esp_err_t err = tnfs_open(argv[1], false, false, &rin);
+        if (err != ESP_OK) {
+            cli_printf(c, "%s: %s\r\n", argv[1],
+                       err == ESP_ERR_NOT_FOUND ? "not found" :
+                       err == ESP_ERR_TIMEOUT   ? "server unreachable" : "open failed");
+            return 1;
         }
-        copied += (uint32_t)n;
+        total = tnfs_size(rin);
+    } else {
+        char path[16 + CONFIG_FILE_CAP];
+        if (!resolve(c, argv[1], path, sizeof path)) {
+            return 1;
+        }
+        sin = fopen(path, "rb");
+        if (!sin) {
+            cli_printf(c, "%s: %s\r\n", argv[1], strerror(errno));
+            return 1;
+        }
     }
-    if (ok && ferror(in)) {
-        cli_printf(c, "copy: read error: %s\r\n", strerror(errno));
-        ok = false;
+
+    /* Open destination (create+truncate for a remote push). */
+    FILE *sout = NULL;
+    tnfs_file_t *rout = NULL;
+    if (dst_remote) {
+        esp_err_t err = tnfs_open(argv[2], true, true, &rout);
+        if (err != ESP_OK) {
+            cli_printf(c, "%s: %s\r\n", argv[2],
+                       err == ESP_ERR_TIMEOUT ? "server unreachable" : "create failed");
+            if (rin) { tnfs_close(rin); } else { fclose(sin); }
+            return 1;
+        }
+    } else {
+        char path[16 + CONFIG_FILE_CAP];
+        if (!resolve(c, argv[2], path, sizeof path)) {
+            if (rin) { tnfs_close(rin); } else { fclose(sin); }
+            return 1;
+        }
+        sout = fopen(path, "wb");
+        if (!sout) {
+            cli_printf(c, "%s: %s\r\n", argv[2], strerror(errno));
+            if (rin) { tnfs_close(rin); } else { fclose(sin); }
+            return 1;
+        }
     }
-    fclose(in);
-    if (fclose(out) != 0 && ok) {
-        cli_printf(c, "copy: close error: %s\r\n", strerror(errno));
-        ok = false;
+
+    uint8_t buf[512];
+    uint32_t off = 0;
+    bool ok = true;
+    const char *msg = NULL;
+    for (;;) {
+        size_t n;
+        if (src_remote) {
+            if (off >= total) {
+                break;
+            }
+            uint32_t want = total - off;
+            if (want > sizeof buf) {
+                want = sizeof buf;
+            }
+            if (tnfs_read_at(rin, off, buf, want) != ESP_OK) {
+                ok = false; msg = "copy: remote read error\r\n"; break;
+            }
+            n = want;
+        } else {
+            n = fread(buf, 1, sizeof buf, sin);
+            if (n == 0) {
+                if (ferror(sin)) { ok = false; msg = "copy: read error\r\n"; }
+                break;
+            }
+        }
+        if (dst_remote) {
+            if (tnfs_write_at(rout, off, buf, n) != ESP_OK) {
+                ok = false; msg = "copy: remote write error\r\n"; break;
+            }
+        } else if (fwrite(buf, 1, n, sout) != n) {
+            ok = false; msg = "copy: write error\r\n"; break;
+        }
+        off += (uint32_t)n;
     }
-    if (ok) {
-        cli_printf(c, "copied %lu bytes\r\n", (unsigned long)copied);
+
+    if (rin) { tnfs_close(rin); } else { fclose(sin); }
+    if (rout) {
+        tnfs_close(rout);
+    } else if (fclose(sout) != 0 && ok) {
+        ok = false; msg = "copy: close error\r\n";
     }
-    return ok ? 0 : 1;
+
+    if (!ok) {
+        cli_write(c, msg ? msg : "copy: failed\r\n");
+        return 1;
+    }
+    cli_printf(c, "copied %lu bytes\r\n", (unsigned long)off);
+    return 0;
 }
 
 static int cmd_save(cli_console_t *c, int argc, char **argv)

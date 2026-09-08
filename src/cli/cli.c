@@ -14,6 +14,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
 #include "esp_log.h"
@@ -22,6 +23,18 @@
 #include "config.h"
 
 static const char *TAG = "cli";
+
+/*
+ * Serializes every writer to the UART0 console — line-editor echo, prompts and
+ * command output (all via serial_write) plus ESP_LOG (via console_log_vprintf) —
+ * so a keystroke echo can never land *inside* a log line. That splice was the
+ * character-drop bug: an echo byte dropped into the middle of a log line's ANSI
+ * color escape (\033[..m) was swallowed by the terminal's escape parser, so the
+ * byte still reached the command buffer (the command ran) but never appeared on
+ * screen. newlib's per-FILE lock only guards a single fwrite call, not a whole
+ * log line, so it couldn't prevent this; this mutex makes each line atomic.
+ */
+static SemaphoreHandle_t s_tx_lock;
 
 /* Sentinel returned by cli_match() when a token matches more than one command. */
 #define CLI_AMBIGUOUS ((const cli_command_t *)-1)
@@ -229,14 +242,34 @@ void cli_feed(cli_console_t *c, char ch)
 static void serial_write(void *ctx, const char *data, size_t len)
 {
     (void)ctx;
-    /* Write through stdout, NOT uart_write_bytes: printf/ESP_LOG also write to
-     * stdout, so newlib's per-FILE lock then serialises our line-editor echo
-     * against concurrent log output — neither can drop or interleave the other's
-     * bytes. (uart_write_bytes is a separate entry point that bypasses that lock,
-     * which let a keystroke echo be lost when a log burst — e.g. WiFi connect —
-     * landed at the same instant.) */
+    /* Write through stdout (NOT uart_write_bytes) so line-ending handling matches
+     * printf/ESP_LOG, and hold s_tx_lock across the whole write so this output is
+     * atomic against a concurrent log line (see s_tx_lock). */
+    if (s_tx_lock) {
+        xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    }
     fwrite(data, 1, len, stdout);
     fflush(stdout);
+    if (s_tx_lock) {
+        xSemaphoreGive(s_tx_lock);
+    }
+}
+
+/*
+ * ESP_LOG sink: emit each whole log line under s_tx_lock so it can never be
+ * interleaved with (and splice a byte out of) the line-editor echo. Registered
+ * with esp_log_set_vprintf() once the console is up.
+ */
+static int console_log_vprintf(const char *fmt, va_list ap)
+{
+    if (s_tx_lock) {
+        xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    }
+    int n = vprintf(fmt, ap);
+    if (s_tx_lock) {
+        xSemaphoreGive(s_tx_lock);
+    }
+    return n;
 }
 
 static void cli_serial_task(void *arg)
@@ -270,11 +303,22 @@ void cli_serial_start(void)
      * flush at once (less lock churn) while echo flushes immediately via fflush.
      * Without this, a log burst landing next to a keystroke could drop the echo. */
     if (!uart_is_driver_installed(UART_NUM_0)) {
-        ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 512, 0, NULL, 0));
+        /* Generous rings: the cli task (prio 5, core 0) can be briefly starved by the
+         * net/wifi tasks during a connect burst, so size RX to hold type-ahead without
+         * overflowing and TX so a log burst never stalls keystroke echo. */
+        ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 2048, 2048, 0, NULL, 0));
         uart_vfs_dev_use_driver(UART_NUM_0);
         setvbuf(stdout, NULL, _IOLBF, 256);
     }
-    xTaskCreatePinnedToCore(cli_serial_task, "cli", 4096, NULL, 5, NULL, 0);
+    if (!s_tx_lock) {
+        s_tx_lock = xSemaphoreCreateMutex();
+        /* Route ESP_LOG through the same console lock as our echo/prompt output so
+         * a keystroke echo can never be spliced into a log line (see s_tx_lock). */
+        esp_log_set_vprintf(console_log_vprintf);
+    }
+    /* 8 KB: the CLI now runs deep paths (TNFS copy over the network stack, file I/O)
+     * that the original line editor never needed (M9). */
+    xTaskCreatePinnedToCore(cli_serial_task, "cli", 8192, NULL, 5, NULL, 0);
 }
 
 void cli_init(void)

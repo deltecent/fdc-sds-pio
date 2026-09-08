@@ -551,6 +551,13 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
   (`MOUNT` → session id, then `OPEN`/`LSEEK`/`READ`/`WRITE`/`CLOSE`, `UMOUNT`),
   little-endian, retried datagrams with a sequence byte and per-request timeout/retry.
   Reference: the FujiNet `tnfsd` server project and its protocol document.
+- **TCP fallback [CLAUDE — resolved during M9a].** UDP stays the default, but the client
+  **falls back to TCP** on the same port when the UDP `MOUNT` probe times out — many
+  hosted `tnfsd` servers (e.g. the AWS-hosted `tnfs.mitsaltair.com` test server) answer
+  only over TCP. TCP carries the *same* messages with no length prefix, so a reply is
+  framed by reading the header+status and then the exact command-specific remainder;
+  because of that, file **size comes from a fixed-length `LSEEK(SEEK_END)`** rather than
+  the variable-length `STAT` reply. The fallback is transparent to callers.
 - **Client — [CLAUDE — resolved: hand-roll behind `net/tnfs`].** The protocol is small
   and there is no clean standalone IDF-native component (existing ones are entangled with
   FujiNet firmware). Write a compact client on IDF BSD sockets behind a thin `net/tnfs`
