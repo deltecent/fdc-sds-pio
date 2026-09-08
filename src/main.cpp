@@ -18,6 +18,7 @@
 #include "config.h"
 #include "disk.h"
 #include "fdc.h"
+#include "net.h"
 #include "pins.h"
 #include "sd.h"
 #include "version.h"
@@ -97,4 +98,10 @@ extern "C" void app_main(void)
 
     cli_init();
     cli_serial_start();
+
+    /* §12 step 9: networking (WiFi STA + raw-TCP console + mDNS + NTP). Event-driven;
+     * connects only if enabled with an SSID set. Non-fatal — serial CLI stays up. */
+    if (net_init() != ESP_OK) {
+        ESP_LOGW(TAG, "networking init failed; serial console still available");
+    }
 }

@@ -69,6 +69,34 @@ The server is geometry-agnostic — it uses whatever transfer length the FDC sen
 bytes**, so `--len 8192` / `--track-len 8192` (the defaults). Standard 8" floppy images
 (337,664 bytes) use a different track length — pass the right `--track-len` for those.
 
+## Host adapter baud ceiling (test-rig limit, not the firmware)
+
+Over-the-wire testing with the FT232-class USB adapter is reliable up to **230400**.
+At **403200 / 460800** the *host* drops bytes: the ESP32 transmits a perfectly gapless
+stream at those rates, and the FT232R + macOS USB path can't drain its RX FIFO fast
+enough, overrunning and dropping interior chunks (a UART **TX** underrun can only add
+idle gaps — it can never drop bytes, so byte loss is always a **receiver** overrun).
+Proof: `serloop.py` (below) is clean at every baud, and `fdcsim` at ≤230400 is
+byte-perfect across the whole image.
+
+So: **cap host/`fdcsim` testing at 230400; validate 403200 and 460800 against the real
+Altair FDC+** (a hardware UART receiver, not a latency-timer-batched USB adapter — the
+rates the protocol and the reference server were designed around).
+
+### `serloop.py` — host-only loopback baud sweep
+
+Decides whether an adapter itself can sustain each baud, with **no ESP32 involved**.
+Jumper the adapter's **own TX ↔ its own RX**, then:
+
+```
+./serloop.py --port /dev/cu.usbserial-AB0NW409      # all bauds, 8194-byte frames
+```
+
+All-OK means the adapter is fine and any failure on the wired ESP32 link at that baud is
+the firmware's fault; failures at the top rates mean the adapter is the ceiling. Unlike
+the ESP32's own `loopback` command (TX↔RX on one chip, one clock — passes even at a wrong
+absolute baud), looping the adapter back exercises its real clock + USB path.
+
 ## Notes
 
 - A READ to an unmounted or out-of-range drive gets **no reply** (the server is a passive

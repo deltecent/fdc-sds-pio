@@ -15,6 +15,7 @@
 #include <strings.h>
 #include <errno.h>
 #include <dirent.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -26,6 +27,7 @@
 #include "config.h"
 #include "disk.h"
 #include "fdc.h"
+#include "net.h"
 #include "sd.h"
 #include "version.h"
 #include "wildcard.h"
@@ -48,6 +50,12 @@ static int cmd_baud(cli_console_t *c, int argc, char **argv);
 static int cmd_stats(cli_console_t *c, int argc, char **argv);
 static int cmd_clear(cli_console_t *c, int argc, char **argv);
 static int cmd_loopback(cli_console_t *c, int argc, char **argv);
+static int cmd_wifi(cli_console_t *c, int argc, char **argv);
+static int cmd_ssid(cli_console_t *c, int argc, char **argv);
+static int cmd_pass(cli_console_t *c, int argc, char **argv);
+static int cmd_time(cli_console_t *c, int argc, char **argv);
+static int cmd_tz(cli_console_t *c, int argc, char **argv);
+static int cmd_logout(cli_console_t *c, int argc, char **argv);
 static int cmd_stub(cli_console_t *c, int argc, char **argv);
 
 /* Order here is the order `help` prints. */
@@ -63,22 +71,22 @@ static const cli_command_t k_commands[] = {
     { "save",     "write",  "Persist config to NVS",          cmd_save     },
     { "wipe",     NULL,     "Erase NVS, reload defaults",     cmd_wipe     },
     { "dump",     NULL,     "Hex-dump a track buffer",        cmd_dump     },
-    { "wifi",     NULL,     "Show/enable/disable WiFi",       cmd_stub     },
-    { "ssid",     NULL,     "Set WiFi SSID",                  cmd_stub     },
-    { "pass",     NULL,     "Set WiFi password",              cmd_stub     },
+    { "wifi",     NULL,     "Show/enable/disable WiFi",       cmd_wifi     },
+    { "ssid",     NULL,     "Set WiFi SSID",                  cmd_ssid     },
+    { "pass",     NULL,     "Set WiFi password",              cmd_pass     },
     { "hostname", NULL,     "Set device/host name",           cmd_hostname },
     { "ftpuser",  NULL,     "Set FTP username",               cmd_stub     },
     { "ftppass",  NULL,     "Set FTP password",               cmd_stub     },
     { "update",   NULL,     "OTA update (SD / github / url)", cmd_stub     },
     { "type",     "cat",    "Print a text file",              cmd_type     },
     { "exec",     "run",    "Run a batch file of commands",   cmd_stub     },
-    { "logout",   "exit",   "Disconnect network client",      cmd_stub     },
+    { "logout",   "exit",   "Disconnect network client",      cmd_logout   },
     { "delete",   "rm",     "Delete a file",                  cmd_delete   },
     { "rename",   "mv",     "Rename a file",                  cmd_rename   },
     { "copy",     "cp",     "Copy a file",                    cmd_copy     },
     { "loopback", "lb",     "FDC+ serial loopback test",      cmd_loopback },
-    { "time",     "date",   "Show current time",              cmd_stub     },
-    { "tz",       NULL,     "Set/show timezone (tz ? lists)", cmd_stub     },
+    { "time",     "date",   "Show current time",              cmd_time     },
+    { "tz",       NULL,     "Set/show timezone (tz ? lists)", cmd_tz       },
     { "reboot",   NULL,     "Clean shutdown + restart",       cmd_reboot   },
 };
 
@@ -615,6 +623,159 @@ static int cmd_loopback(cli_console_t *c, int argc, char **argv)
                (unsigned long)r.mismatches, (unsigned long)r.first_bad);
     cli_write(c, "  (check TX<->RX jumper, wiring, and baud)\r\n");
     return 1;
+}
+
+/* ---- M5: networking + time (DESIGN.md §9.1 / §8.3) ------------------------- */
+
+static int cmd_wifi(cli_console_t *c, int argc, char **argv)
+{
+    if (argc > 1) {
+        if (strcasecmp(argv[1], "on") == 0) {
+            config_set_wifi_enabled(true);
+            esp_err_t err = net_wifi_enable(true);
+            if (err == ESP_ERR_INVALID_STATE) {
+                cli_write(c, "set an SSID first (ssid <name>)\r\n");
+                return 1;
+            }
+            if (err != ESP_OK) {
+                cli_printf(c, "wifi on: %s\r\n", esp_err_to_name(err));
+                return 1;
+            }
+            cli_write(c, "WiFi enabled; connecting...\r\n");
+            return 0;
+        }
+        if (strcasecmp(argv[1], "off") == 0) {
+            config_set_wifi_enabled(false);
+            net_wifi_enable(false);
+            cli_write(c, "WiFi disabled\r\n");
+            return 0;
+        }
+        cli_write(c, "usage: wifi [on|off]\r\n");
+        return 1;
+    }
+
+    net_status_t s;
+    net_get_status(&s);
+    cli_printf(c, "WiFi:  %s\r\n", s.enabled ? "enabled" : "disabled");
+    cli_printf(c, "SSID:  %s\r\n", s.ssid[0] ? s.ssid : "(unset)");
+    if (s.connected) {
+        cli_printf(c, "State: connected  IP %s  RSSI %d dBm\r\n", s.ip, s.rssi);
+    } else {
+        cli_printf(c, "State: %s\r\n", s.enabled ? "connecting/disconnected" : "idle");
+    }
+    return 0;
+}
+
+static int cmd_ssid(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        const char *ssid = config_get()->wifi_ssid;
+        cli_printf(c, "%s\r\n", ssid[0] ? ssid : "(unset)");
+        return 0;
+    }
+    if (strlen(argv[1]) >= CONFIG_SSID_CAP) {
+        cli_printf(c, "SSID too long (max %d)\r\n", CONFIG_SSID_CAP - 1);
+        return 1;
+    }
+    config_set_str(CFG_STR_WIFI_SSID, argv[1]);
+    cli_printf(c, "SSID set to %s\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_pass(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        /* Never echo the stored password back. */
+        cli_printf(c, "WiFi password is %s\r\n",
+                   config_get()->wifi_pass[0] ? "set" : "unset");
+        return 0;
+    }
+    if (strlen(argv[1]) >= CONFIG_PASS_CAP) {
+        cli_printf(c, "password too long (max %d)\r\n", CONFIG_PASS_CAP - 1);
+        return 1;
+    }
+    config_set_str(CFG_STR_WIFI_PASS, argv[1]);
+    cli_write(c, "WiFi password set\r\n");
+    return 0;
+}
+
+static int cmd_time(cli_console_t *c, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    /* Pre-2016 means the RTC was never set — NTP hasn't synced yet (needs WiFi). */
+    if (tm.tm_year < (2016 - 1900)) {
+        cli_write(c, "time not set (waiting for NTP; needs WiFi)\r\n");
+        return 0;
+    }
+    char buf[64];
+    strftime(buf, sizeof buf, "%a %Y-%m-%d %H:%M:%S %Z", &tm);
+    cli_printf(c, "%s\r\n", buf);
+    return 0;
+}
+
+/* US timezone names -> POSIX TZ strings (DESIGN.md §8.3). */
+static const struct {
+    const char *name;
+    const char *tz;
+} k_tzs[] = {
+    { "UTC",      "UTC0" },
+    { "Eastern",  "EST5EDT,M3.2.0,M11.1.0" },
+    { "Central",  "CST6CDT,M3.2.0,M11.1.0" },
+    { "Mountain", "MST7MDT,M3.2.0,M11.1.0" },
+    { "Arizona",  "MST7" },
+    { "Pacific",  "PST8PDT,M3.2.0,M11.1.0" },
+    { "Alaska",   "AKST9AKDT,M3.2.0,M11.1.0" },
+    { "Hawaii",   "HST10" },
+};
+#define TZ_COUNT (sizeof(k_tzs) / sizeof(k_tzs[0]))
+
+static int cmd_tz(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_printf(c, "timezone: %s\r\n", config_get()->time_zone);
+        return 0;
+    }
+    if (strcmp(argv[1], "?") == 0) {
+        cli_write(c, "Timezones (name -> POSIX TZ):\r\n");
+        for (size_t i = 0; i < TZ_COUNT; ++i) {
+            cli_printf(c, "  %-9s %s\r\n", k_tzs[i].name, k_tzs[i].tz);
+        }
+        cli_write(c, "Or pass a raw POSIX TZ string.\r\n");
+        return 0;
+    }
+
+    /* Accept a US name (case-insensitive) or a raw POSIX TZ string (§8.3). */
+    const char *posix = NULL;
+    for (size_t i = 0; i < TZ_COUNT; ++i) {
+        if (strcasecmp(argv[1], k_tzs[i].name) == 0) {
+            posix = k_tzs[i].tz;
+            break;
+        }
+    }
+    if (!posix) {
+        posix = argv[1];
+    }
+    if (strlen(posix) >= CONFIG_TZ_CAP) {
+        cli_printf(c, "timezone too long (max %d)\r\n", CONFIG_TZ_CAP - 1);
+        return 1;
+    }
+    config_set_str(CFG_STR_TIME_ZONE, posix);
+    net_apply_timezone(); /* apply live so `time` reflects it immediately */
+    cli_printf(c, "timezone set to %s\r\n", posix);
+    return 0;
+}
+
+static int cmd_logout(cli_console_t *c, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    cli_write(c, "Goodbye\r\n");
+    c->disconnect = true; /* honored by the TCP console; the serial console ignores it */
+    return 0;
 }
 
 static int cmd_stub(cli_console_t *c, int argc, char **argv)
