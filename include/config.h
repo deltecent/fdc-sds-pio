@@ -36,6 +36,7 @@ extern "C" {
 /* In-memory configuration (mirrors the NVS schema in DESIGN.md §7). */
 typedef struct {
     uint32_t baud_rate;                       /* FDC+ baud */
+    uint8_t  log_level;                       /* console log verbosity, esp_log_level_t (§13) */
     bool     wifi_enabled;                    /* WiFi on/off */
     char     wifi_ssid[CONFIG_SSID_CAP];      /* SSID */
     char     wifi_pass[CONFIG_PASS_CAP];      /* password */
@@ -80,6 +81,7 @@ esp_err_t config_wipe(void);
 /* Setters copy the value in and mark the config dirty. */
 void config_set_baud(uint32_t baud);
 void config_set_wifi_enabled(bool enabled);
+void config_set_log_level(uint8_t level);  /* esp_log_level_t (§13) */
 void config_set_str(config_str_id_t id, const char *val);
 
 /* Set (filename) or clear (NULL/"") the image mounted on drive n (0..3). */

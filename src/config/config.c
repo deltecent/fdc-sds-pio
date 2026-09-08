@@ -21,6 +21,7 @@ static const char *TAG = "config";
 
 /* NVS keys — mirror the DESIGN.md §7 table exactly (all ≤15 chars, NVS's limit). */
 #define KEY_BAUD    "baudRate"
+#define KEY_LOGLVL  "logLevel"
 #define KEY_WIFI_EN "wifiEnabled"
 #define KEY_SSID    "wifiSSID"
 #define KEY_PASS    "wifiPass"
@@ -40,6 +41,9 @@ static void set_defaults(void)
 {
     memset(&s_cfg, 0, sizeof s_cfg);
     s_cfg.baud_rate = 403200;
+    /* Quiet console by default: warnings + errors only, INFO/DEBUG spam off (§13).
+     * The `log` command raises it at runtime; net_init/wifi/fdc log at INFO. */
+    s_cfg.log_level = ESP_LOG_WARN;
     s_cfg.wifi_enabled = false;
     /* ssid/pass empty */
     strcpy(s_cfg.wifi_name, "FDC-SDS-ESP32");
@@ -71,6 +75,9 @@ static void load_from_nvs(nvs_handle_t h)
         s_cfg.baud_rate = u32;
     }
     uint8_t u8;
+    if (nvs_get_u8(h, KEY_LOGLVL, &u8) == ESP_OK) {
+        s_cfg.log_level = u8;
+    }
     if (nvs_get_u8(h, KEY_WIFI_EN, &u8) == ESP_OK) {
         s_cfg.wifi_enabled = (u8 != 0);
     }
@@ -145,6 +152,7 @@ esp_err_t config_save(void)
     }
 
     err = nvs_set_u32(h, KEY_BAUD, s_cfg.baud_rate);
+    if (err == ESP_OK) err = nvs_set_u8(h, KEY_LOGLVL, s_cfg.log_level);
     if (err == ESP_OK) err = nvs_set_u8(h, KEY_WIFI_EN, s_cfg.wifi_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_SSID, s_cfg.wifi_ssid);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_PASS, s_cfg.wifi_pass);
@@ -206,6 +214,14 @@ void config_set_wifi_enabled(bool enabled)
 {
     if (s_cfg.wifi_enabled != enabled) {
         s_cfg.wifi_enabled = enabled;
+        s_dirty = true;
+    }
+}
+
+void config_set_log_level(uint8_t level)
+{
+    if (s_cfg.log_level != level) {
+        s_cfg.log_level = level;
         s_dirty = true;
     }
 }

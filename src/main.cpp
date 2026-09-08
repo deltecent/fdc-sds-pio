@@ -76,6 +76,11 @@ extern "C" void app_main(void)
 {
     print_banner();
 
+    /* Quiet the console early (§13): drop the IDF INFO default to WARN before the
+     * subsystems below start logging. The saved level is re-applied once config
+     * loads; the banner above is printf, so it prints regardless. */
+    esp_log_level_set("*", ESP_LOG_WARN);
+
     leds_init();
     led_lamp_test();
 
@@ -86,6 +91,9 @@ extern "C" void app_main(void)
 
     /* §12 step 4: load persistent config (defaults if NVS is empty). */
     ESP_ERROR_CHECK(config_init());
+
+    /* Apply the saved console log level now that config is loaded (§13). */
+    esp_log_level_set("*", (esp_log_level_t)config_get()->log_level);
 
     /* §12 step 5: mount configured drives (SD-backed; tnfs:// deferred to WiFi, M9). */
     ESP_ERROR_CHECK(disk_init());

@@ -331,6 +331,7 @@ v1 schema (namespace `fdcsds`):
 | Key | Type | Meaning | Default |
 |---|---|---|---|
 | `baudRate` | u32 | FDC+ baud | `403200` |
+| `logLevel` | u8 | Console log verbosity, `esp_log_level_t` 0–5 *(see §13)* | `2` (warn) |
 | `wifiEnabled` | bool | WiFi on/off | `false` |
 | `wifiSSID` | string(≤80) | SSID | empty |
 | `wifiPass` | string(≤80) | password | empty |
@@ -390,6 +391,7 @@ needed.
 | `unmount` / `umount` | drive | Unmount a drive |
 | `stats` | — | Baud + STAT/READ/WRIT/ERR/TOUT counters + last-op strings |
 | `clear` | — | Zero statistics |
+| `log` | level | Show/set console log level: `none`/`error`/`warn`/`info`/`debug`/`verbose` (also `off`=none, `on`=info); default `warn` (§13) |
 | `save` / `write` | — | Persist config to NVS |
 | `wipe` | — | Erase NVS, reload defaults |
 | `dump` | — | Hex-dump current track buffer |
@@ -414,8 +416,9 @@ needed.
 
 - All filename args resolve relative to SD root.
 - Bounds-check drive numbers as `0..MAX_DRIVE-1` (fix the old `> MAX_DRIVE` off-by-one).
-- Set is locked for v1 at the level of command *names*: the only new names beyond the
-  original baseline are `ftpuser`/`ftppass`. Existing commands gained argument forms:
+- The set stays close to the original baseline at the level of command *names*: the new
+  names beyond it are `ftpuser`/`ftppass` (§9.4) and `log` (the console-verbosity knob,
+  §13). Existing commands gained argument forms:
   the `update local`/`update ota` arguments (bare `update` reports version status; a bare
   `update <url>` also works but is undocumented, §11.1), an optional glob `spec` on
   `dir`/`ls` (§8.4), a
@@ -705,6 +708,17 @@ front end plus the version-marker check.
 In-RAM counters: `stat`, `read`, `writ`, `errs` (checksum), `tout` (timeouts); plus
 formatted "last STAT/READ/WRIT/error" strings. `dump` hex-dumps the track buffer.
 `clear` resets. Not persisted.
+
+**Console log verbosity.** IDF's `ESP_LOG` output (WiFi/net/fdc/sd/ftp INFO, etc.) is
+gated by a runtime level so the console is quiet in normal use and verbose only on
+demand. The `log` command sets it — `log none|error|warn|info|debug|verbose` (with
+`off`=none, `on`=info), bare `log` reports the current level — calling
+`esp_log_level_set("*", level)` live. The level persists in NVS (`logLevel`, §7) and is
+re-applied at boot: `app_main` drops the level to `warn` immediately (so the boot
+subsystems are quiet by default), then applies the saved level once config loads. Default
+is `warn` (warnings + errors still show; the printf banner always shows). The firmware is
+built with `ESP_LOG` compiled in up to `info`, so `debug`/`verbose` need a debug build to
+emit more.
 
 ---
 

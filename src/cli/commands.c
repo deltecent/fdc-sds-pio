@@ -9,8 +9,9 @@
  * engine into the CLI: stats/clear, loopback, and live baud application. M5 added the
  * net/time commands (wifi/ssid/pass/time/tz/logout) and M6 the FTP credentials
  * (ftpuser/ftppass). M7 wires in `update` (SD / network OTA, §11). M8 fills in the last
- * command, `exec`/`run` (batch files, §8.2), plus the `.bat` auto-run and boot-time
- * /autoexec.bat hooks the CLI dispatcher and serial task call into.
+ * stubbed command, `exec`/`run` (batch files, §8.2) — plus the `.bat` auto-run and
+ * boot-time /autoexec.bat hooks the CLI dispatcher and serial task call into — and adds
+ * `log` for the runtime console-verbosity knob (§13).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
+#include "esp_log.h"
 
 #include "cli.h"
 #include "config.h"
@@ -53,6 +55,7 @@ static int cmd_hostname(cli_console_t *c, int argc, char **argv);
 static int cmd_baud(cli_console_t *c, int argc, char **argv);
 static int cmd_stats(cli_console_t *c, int argc, char **argv);
 static int cmd_clear(cli_console_t *c, int argc, char **argv);
+static int cmd_log(cli_console_t *c, int argc, char **argv);
 static int cmd_loopback(cli_console_t *c, int argc, char **argv);
 static int cmd_wifi(cli_console_t *c, int argc, char **argv);
 static int cmd_ssid(cli_console_t *c, int argc, char **argv);
@@ -75,6 +78,7 @@ static const cli_command_t k_commands[] = {
     { "unmount",  "umount", "Unmount a drive",                cmd_unmount  },
     { "stats",    NULL,     "Show FDC+ statistics",           cmd_stats    },
     { "clear",    NULL,     "Zero FDC+ statistics",           cmd_clear    },
+    { "log",      NULL,     "Set console log level",          cmd_log      },
     { "save",     "write",  "Persist config to NVS",          cmd_save     },
     { "wipe",     NULL,     "Erase NVS, reload defaults",     cmd_wipe     },
     { "dump",     NULL,     "Hex-dump a track buffer",        cmd_dump     },
@@ -606,6 +610,68 @@ static int cmd_clear(cli_console_t *c, int argc, char **argv)
     (void)argv;
     fdc_clear_stats();
     cli_write(c, "statistics cleared\r\n");
+    return 0;
+}
+
+/* ---- M8: console log verbosity (`log`, DESIGN.md §13) ---------------------- */
+
+/* Level names <-> esp_log_level_t. Default is `warn` (quiet); INFO/DEBUG are opt-in. */
+static const struct {
+    const char     *name;
+    esp_log_level_t level;
+} k_log_levels[] = {
+    { "none",    ESP_LOG_NONE    },
+    { "error",   ESP_LOG_ERROR   },
+    { "warn",    ESP_LOG_WARN    },
+    { "info",    ESP_LOG_INFO    },
+    { "debug",   ESP_LOG_DEBUG   },
+    { "verbose", ESP_LOG_VERBOSE },
+};
+#define LOG_LEVEL_COUNT (sizeof(k_log_levels) / sizeof(k_log_levels[0]))
+
+static const char *log_level_name(uint8_t level)
+{
+    for (size_t i = 0; i < LOG_LEVEL_COUNT; ++i) {
+        if (k_log_levels[i].level == (esp_log_level_t)level) {
+            return k_log_levels[i].name;
+        }
+    }
+    return "?";
+}
+
+static int cmd_log(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_printf(c, "log level: %s\r\n", log_level_name(config_get()->log_level));
+        return 0;
+    }
+
+    /* A level name, or the friendly aliases off (=none) / on (=info). */
+    esp_log_level_t level = ESP_LOG_NONE;
+    bool matched = false;
+    if (strcasecmp(argv[1], "off") == 0) {
+        level = ESP_LOG_NONE;
+        matched = true;
+    } else if (strcasecmp(argv[1], "on") == 0) {
+        level = ESP_LOG_INFO;
+        matched = true;
+    } else {
+        for (size_t i = 0; i < LOG_LEVEL_COUNT; ++i) {
+            if (strcasecmp(argv[1], k_log_levels[i].name) == 0) {
+                level = k_log_levels[i].level;
+                matched = true;
+                break;
+            }
+        }
+    }
+    if (!matched) {
+        cli_write(c, "usage: log none|error|warn|info|debug|verbose\r\n");
+        return 1;
+    }
+
+    config_set_log_level((uint8_t)level);
+    esp_log_level_set("*", level); /* apply live to every tag */
+    cli_printf(c, "log level set to %s (save to persist)\r\n", log_level_name((uint8_t)level));
     return 0;
 }
 
