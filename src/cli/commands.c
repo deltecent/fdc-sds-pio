@@ -5,8 +5,9 @@
  * dir/ls, type/cat, delete/rm, rename/mv, copy/cp, save/write, wipe, hostname,
  * and baud (store-only until the FDC UART lands at M4). M3 adds the disk-module
  * commands mount/unmount and dump, plus the `dir <spec>` glob (§8.4). The remaining
- * commands stay stubbed and are filled in by later milestones (M4 FDC, M5 net/time,
- * M6 FTP creds, M7 update).
+ * commands stay stubbed and are filled in by later milestones. M4 wires the FDC+
+ * engine into the CLI: stats/clear, loopback, and live baud application. The remaining
+ * stubs are M5 net/time, M6 FTP creds, M7 update.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +25,7 @@
 #include "cli.h"
 #include "config.h"
 #include "disk.h"
+#include "fdc.h"
 #include "sd.h"
 #include "version.h"
 #include "wildcard.h"
@@ -43,6 +45,9 @@ static int cmd_save(cli_console_t *c, int argc, char **argv);
 static int cmd_wipe(cli_console_t *c, int argc, char **argv);
 static int cmd_hostname(cli_console_t *c, int argc, char **argv);
 static int cmd_baud(cli_console_t *c, int argc, char **argv);
+static int cmd_stats(cli_console_t *c, int argc, char **argv);
+static int cmd_clear(cli_console_t *c, int argc, char **argv);
+static int cmd_loopback(cli_console_t *c, int argc, char **argv);
 static int cmd_stub(cli_console_t *c, int argc, char **argv);
 
 /* Order here is the order `help` prints. */
@@ -53,8 +58,8 @@ static const cli_command_t k_commands[] = {
     { "dir",      "ls",     "List SD files [glob spec]",      cmd_dir      },
     { "mount",    NULL,     "Show mount table / mount image", cmd_mount    },
     { "unmount",  "umount", "Unmount a drive",                cmd_unmount  },
-    { "stats",    NULL,     "Show statistics",                cmd_stub     },
-    { "clear",    NULL,     "Zero statistics",                cmd_stub     },
+    { "stats",    NULL,     "Show FDC+ statistics",           cmd_stats    },
+    { "clear",    NULL,     "Zero FDC+ statistics",           cmd_clear    },
     { "save",     "write",  "Persist config to NVS",          cmd_save     },
     { "wipe",     NULL,     "Erase NVS, reload defaults",     cmd_wipe     },
     { "dump",     NULL,     "Hex-dump a track buffer",        cmd_dump     },
@@ -71,7 +76,7 @@ static const cli_command_t k_commands[] = {
     { "delete",   "rm",     "Delete a file",                  cmd_delete   },
     { "rename",   "mv",     "Rename a file",                  cmd_rename   },
     { "copy",     "cp",     "Copy a file",                    cmd_copy     },
-    { "loopback", "lb",     "FDC+ serial loopback test",      cmd_stub     },
+    { "loopback", "lb",     "FDC+ serial loopback test",      cmd_loopback },
     { "time",     "date",   "Show current time",              cmd_stub     },
     { "tz",       NULL,     "Set/show timezone (tz ? lists)", cmd_stub     },
     { "reboot",   NULL,     "Clean shutdown + restart",       cmd_reboot   },
@@ -557,8 +562,59 @@ static int cmd_baud(cli_console_t *c, int argc, char **argv)
     }
 
     config_set_baud((uint32_t)rate);
+    fdc_set_baud((uint32_t)rate); /* apply live to the running FDC+ link (§6.1) */
     cli_printf(c, "baud set to %lu (applies to FDC+ link)\r\n", rate);
     return 0;
+}
+
+static int cmd_stats(cli_console_t *c, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    fdc_stats_t s;
+    fdc_get_stats(&s);
+    cli_printf(c, "FDC+ link: %lu baud\r\n", (unsigned long)fdc_baud());
+    cli_printf(c, "  STAT     %lu\r\n", (unsigned long)s.stat);
+    cli_printf(c, "  READ     %lu\r\n", (unsigned long)s.read);
+    cli_printf(c, "  WRIT     %lu\r\n", (unsigned long)s.writ);
+    cli_printf(c, "  not-rdy  %lu\r\n", (unsigned long)s.not_ready);
+    cli_printf(c, "  csum-err %lu\r\n", (unsigned long)s.csum_err);
+    cli_printf(c, "  timeout  %lu\r\n", (unsigned long)s.timeouts);
+    cli_printf(c, "  unknown  %lu\r\n", (unsigned long)s.unknown);
+    cli_printf(c, "  last     %s\r\n", s.last_op[0] ? s.last_op : "(none)");
+    return 0;
+}
+
+static int cmd_clear(cli_console_t *c, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    fdc_clear_stats();
+    cli_write(c, "statistics cleared\r\n");
+    return 0;
+}
+
+static int cmd_loopback(cli_console_t *c, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    cli_write(c, "loopback: jumper FDC+ TX<->RX, sending 256-byte pattern...\r\n");
+    fdc_loopback_t r;
+    esp_err_t err = fdc_loopback(&r);
+    if (err != ESP_OK) {
+        cli_printf(c, "loopback: %s\r\n", esp_err_to_name(err));
+        return 1;
+    }
+    if (r.mismatches == 0) {
+        cli_printf(c, "loopback OK: %lu/%lu bytes matched\r\n",
+                   (unsigned long)r.received, (unsigned long)r.sent);
+        return 0;
+    }
+    cli_printf(c, "loopback FAILED: %lu/%lu received, %lu mismatch(es), first at %lu\r\n",
+               (unsigned long)r.received, (unsigned long)r.sent,
+               (unsigned long)r.mismatches, (unsigned long)r.first_bad);
+    cli_write(c, "  (check TX<->RX jumper, wiring, and baud)\r\n");
+    return 1;
 }
 
 static int cmd_stub(cli_console_t *c, int argc, char **argv)

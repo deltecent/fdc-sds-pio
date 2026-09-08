@@ -22,6 +22,12 @@
 #define FDC_CMD_LEN       4
 #define FDC_CHECKSUM_LEN  2
 
+/* Byte offsets within a 10-byte command/response block (DESIGN.md §6.2). */
+#define FDC_OFF_CMD    0  /* 4-byte ASCII mnemonic */
+#define FDC_OFF_WORD1  4  /* param 1 / response code (LE 16-bit) */
+#define FDC_OFF_WORD2  6  /* param 2 / response data (LE 16-bit) */
+#define FDC_OFF_CKSUM  8  /* checksum of bytes 0..7 (LE 16-bit) */
+
 /* Response codes (DESIGN.md §6.3). */
 #define FDC_RESP_OK          0
 #define FDC_RESP_NOT_READY   1
@@ -46,6 +52,30 @@ static inline uint16_t fdc_checksum16(const uint8_t *data, size_t n)
         sum = (uint16_t)(sum + data[i]);
     }
     return sum;
+}
+
+/* Little-endian 16-bit word accessors for the on-the-wire blocks (DESIGN.md §6.2). */
+static inline uint16_t fdc_read_le16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static inline void fdc_write_le16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+/* Write the trailing checksum (sum of bytes 0..7) into a block being sent (§6.2). */
+static inline void fdc_block_finalize(uint8_t block[FDC_BLOCK_LEN])
+{
+    fdc_write_le16(&block[FDC_OFF_CKSUM], fdc_checksum16(block, FDC_OFF_CKSUM));
+}
+
+/* True if a received block's trailing checksum matches its first 8 bytes (§6.2/§6.4). */
+static inline bool fdc_block_valid(const uint8_t block[FDC_BLOCK_LEN])
+{
+    return fdc_read_le16(&block[FDC_OFF_CKSUM]) == fdc_checksum16(block, FDC_OFF_CKSUM);
 }
 
 /*

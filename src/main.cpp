@@ -17,6 +17,7 @@
 #include "cli.h"
 #include "config.h"
 #include "disk.h"
+#include "fdc.h"
 #include "pins.h"
 #include "sd.h"
 #include "version.h"
@@ -88,6 +89,9 @@ extern "C" void app_main(void)
     /* §12 step 5: mount configured drives (SD-backed; tnfs:// deferred to WiFi, M9). */
     ESP_ERROR_CHECK(disk_init());
     disk_automount();
+
+    /* §12: bring up the FDC+ engine (UART2 + high-prio task on core 1) before the CLI. */
+    ESP_ERROR_CHECK(fdc_init());
 
     ESP_LOGI(TAG, "boot complete; starting serial CLI");
 

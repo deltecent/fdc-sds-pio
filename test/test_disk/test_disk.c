@@ -6,6 +6,8 @@
  * and READ/WRIT drive+track decode (DESIGN.md §6), the STAT mount bitmap, and the
  * `dir` wildcard matcher (DESIGN.md §8.4).
  */
+#include <string.h>
+
 #include <unity.h>
 
 #include "protocol.h"
@@ -28,6 +30,37 @@ static void test_checksum_sum_and_wrap(void)
     }
     TEST_ASSERT_EQUAL_UINT16(0xFF00, fdc_checksum16(big, sizeof big));
     TEST_ASSERT_EQUAL_UINT16(0, fdc_checksum16(a, 0));
+}
+
+/* ---- little-endian words + block checksum framing (DESIGN.md §6.2) --------- */
+
+static void test_le16_roundtrip(void)
+{
+    uint8_t p[2];
+    fdc_write_le16(p, 0xBEEF);
+    TEST_ASSERT_EQUAL_UINT8(0xEF, p[0]); /* low byte first */
+    TEST_ASSERT_EQUAL_UINT8(0xBE, p[1]);
+    TEST_ASSERT_EQUAL_UINT16(0xBEEF, fdc_read_le16(p));
+    TEST_ASSERT_EQUAL_UINT16(0x0000, fdc_read_le16((const uint8_t[]){0, 0}));
+}
+
+static void test_block_finalize_and_valid(void)
+{
+    /* Build a STAT command block (drive 0 selected, head loaded) and check its csum. */
+    uint8_t blk[FDC_BLOCK_LEN] = {0};
+    memcpy(&blk[FDC_OFF_CMD], "STAT", FDC_CMD_LEN);
+    fdc_write_le16(&blk[FDC_OFF_WORD1], 0x0100); /* head=1, drive=0 */
+    fdc_write_le16(&blk[FDC_OFF_WORD2], 0x0000); /* track 0 */
+    fdc_block_finalize(blk);
+
+    /* Checksum = sum of bytes 0..7 = 'S'+'T'+'A'+'T'+0x00+0x01. */
+    uint16_t expect = (uint16_t)('S' + 'T' + 'A' + 'T' + 0x00 + 0x01);
+    TEST_ASSERT_EQUAL_UINT16(expect, fdc_read_le16(&blk[FDC_OFF_CKSUM]));
+    TEST_ASSERT_TRUE(fdc_block_valid(blk));
+
+    /* Corrupt one byte -> checksum must no longer validate. */
+    blk[FDC_OFF_WORD2] ^= 0xFF;
+    TEST_ASSERT_FALSE(fdc_block_valid(blk));
 }
 
 /* ---- READ/WRIT drive+track decode (DESIGN.md §6.3) ------------------------- */
@@ -123,6 +156,8 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_checksum_sum_and_wrap);
+    RUN_TEST(test_le16_roundtrip);
+    RUN_TEST(test_block_finalize_and_valid);
     RUN_TEST(test_word1_decode);
     RUN_TEST(test_track_offset_32bit);
     RUN_TEST(test_track_count);
