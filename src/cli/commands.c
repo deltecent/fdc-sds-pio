@@ -8,7 +8,8 @@
  * commands stay stubbed and are filled in by later milestones. M4 wires the FDC+
  * engine into the CLI: stats/clear, loopback, and live baud application. M5 added the
  * net/time commands (wifi/ssid/pass/time/tz/logout) and M6 the FTP credentials
- * (ftpuser/ftppass). The remaining stubs are exec (M8) and update (M7).
+ * (ftpuser/ftppass). M7 wires in `update` (SD / network OTA, §11). The remaining stub
+ * is exec (M8).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@
 #include "disk.h"
 #include "fdc.h"
 #include "net.h"
+#include "ota.h"
 #include "sd.h"
 #include "version.h"
 #include "wildcard.h"
@@ -59,6 +61,7 @@ static int cmd_tz(cli_console_t *c, int argc, char **argv);
 static int cmd_logout(cli_console_t *c, int argc, char **argv);
 static int cmd_ftpuser(cli_console_t *c, int argc, char **argv);
 static int cmd_ftppass(cli_console_t *c, int argc, char **argv);
+static int cmd_update(cli_console_t *c, int argc, char **argv);
 static int cmd_stub(cli_console_t *c, int argc, char **argv);
 
 /* Order here is the order `help` prints. */
@@ -80,7 +83,7 @@ static const cli_command_t k_commands[] = {
     { "hostname", NULL,     "Set device/host name",           cmd_hostname },
     { "ftpuser",  NULL,     "Set FTP username",               cmd_ftpuser  },
     { "ftppass",  NULL,     "Set FTP password",               cmd_ftppass  },
-    { "update",   NULL,     "OTA update (SD / github / url)", cmd_stub     },
+    { "update",   NULL,     "Firmware: status, or 'local'/'ota' to install", cmd_update },
     { "type",     "cat",    "Print a text file",              cmd_type     },
     { "exec",     "run",    "Run a batch file of commands",   cmd_stub     },
     { "logout",   "exit",   "Disconnect network client",      cmd_logout   },
@@ -814,6 +817,27 @@ static int cmd_logout(cli_console_t *c, int argc, char **argv)
     cli_write(c, "Goodbye\r\n");
     c->disconnect = true; /* honored by the TCP console; the serial console ignores it */
     return 0;
+}
+
+/* ---- M7: firmware update / OTA (DESIGN.md §11 / §11.1) --------------------- */
+
+static int cmd_update(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        /* Bare `update` reports versions (running / SD / OTA) and installs nothing. */
+        return ota_status(c) == ESP_OK ? 0 : 1;
+    }
+    if (strcasecmp(argv[1], "local") == 0) {
+        /* Flash /sd/firmware.bin (the primary, offline path, §11). */
+        return ota_update_sd(c) == ESP_OK ? 0 : 1;
+    }
+    if (strcasecmp(argv[1], "ota") == 0) {
+        /* Network OTA from the configured repo, gated on version.txt (§11.1). */
+        return ota_update_repo(c) == ESP_OK ? 0 : 1;
+    }
+    /* Undocumented: `update <url>` flashes an explicit https:// image now (tnfs:// once
+     * the M9 client lands, §11.1). Deliberately absent from `help`. */
+    return ota_update_url(c, argv[1]) == ESP_OK ? 0 : 1;
 }
 
 static int cmd_stub(cli_console_t *c, int argc, char **argv)

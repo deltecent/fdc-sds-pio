@@ -30,7 +30,7 @@ In scope for v1:
 - Console CLI over **USB serial** and a **raw-TCP network console** on port 23
   (reachable with a `telnet`/`nc` client; not the Telnet protocol — see §9.2).
 - **WiFi** station mode; **FTP** for image transfer.
-- **OTA** firmware update: from `/update.bin` on SD **and** over the network from a
+- **OTA** firmware update: from `/firmware.bin` on SD **and** over the network from a
   GitHub release (§11.1).
 - Persistent configuration in **NVS**.
 - Drive-activity **LEDs** and a status LED.
@@ -338,7 +338,7 @@ v1 schema (namespace `fdcsds`):
 | `timeZone` | string(≤40) | Selected timezone, POSIX `TZ` string | `UTC0` *(see §8.3)* |
 | `ftpUser` | string(≤32) | FTP username *(see §9.4)* | `fdc` |
 | `ftpPass` | string(≤32) | FTP password *(see §9.4)* | `fdc` |
-| `otaRepo` | string(≤64) | GitHub `owner/repo` for network OTA *(see §11.1)* | empty |
+| `otaRepo` | string(≤64) | GitHub `owner/repo` for network OTA *(see §11.1)* | `deltecent/fdc-sds-pio` |
 | `Drive0`…`Drive3` | string(≤128) | mounted image: SD filename **or** `tnfs://` URL (§10.1) | empty |
 
 Rules:
@@ -400,7 +400,7 @@ needed.
 | `ftpuser` | name | Set FTP username (§9.4) |
 | `ftppass` | password | Set FTP password (§9.4) |
 | `reboot` | — | Clean shutdown + restart |
-| `update` | — \| `github` \| url | OTA: default `/update.bin` on SD; `github`/url = network OTA (§11.1) |
+| `update` | — \| `local` \| `ota` | Firmware: bare = show versions (running/SD/OTA); `local` flashes SD `/firmware.bin`; `ota` = network OTA from `otaRepo` (§11.1) |
 | `version` | — | Firmware version |
 | `type` / `cat` | file | Print a text file |
 | `exec` / `run` | file | Run a batch file of CLI commands |
@@ -416,7 +416,9 @@ needed.
 - Bounds-check drive numbers as `0..MAX_DRIVE-1` (fix the old `> MAX_DRIVE` off-by-one).
 - Set is locked for v1 at the level of command *names*: the only new names beyond the
   original baseline are `ftpuser`/`ftppass`. Existing commands gained argument forms:
-  the `update github|url` argument, an optional glob `spec` on `dir`/`ls` (§8.4), a
+  the `update local`/`update ota` arguments (bare `update` reports version status; a bare
+  `update <url>` also works but is undocumented, §11.1), an optional glob `spec` on
+  `dir`/`ls` (§8.4), a
   `tnfs://` URL as a `mount` target, and `tnfs://` endpoints on `copy` (§10.1).
 - Wildcards apply only to `dir`/`ls`; other file commands take one explicit name in v1
   (no glob-delete/-copy). `type`/`delete`/`rename` operate on SD only; `copy` is the one
@@ -567,7 +569,7 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
   leading `/` — Increase to 64 characters.
 - Image handle opened `r+` at mount, kept open for the mount lifetime; READ/WRIT seek
   and transfer on the open handle; unmount closes it.
-- `update.bin` in root drives OTA (§11).
+- `firmware.bin` in root is the image `update local` flashes (§11).
 - `SDCARD/` in this repo mirrors intended card contents: CP/M 2.2 (8 MB + standard),
   CP/M 3, Disk/Timeshare BASIC, AltairDOS, Lifeboat, Games, Zork, a blank 8 MB image,
   plus `.bat` mount scripts and PDFs. Print card type/size on init.
@@ -633,39 +635,53 @@ as with a failed local copy — noted, not cleaned in v1).
 
 ## 11. Firmware Update (OTA)
 
-`update` command:
-1. Open `/update.bin` (non-empty file) from SD root.
+`update` (no argument) reports status only and installs nothing: the running firmware
+version, whether an installable `/firmware.bin` is present on the SD root (with the
+version embedded in that image), and — only when WiFi is up — the version the configured
+repo is offering (§11.1). Installing is an explicit verb.
+
+`update local`:
+1. Open `/firmware.bin` (non-empty file) from SD root.
 2. Stream it into the OTA writer (`esp_ota_ops`: `esp_ota_begin`/`_write`/`_end`)
    targeting the inactive slot.
-3. On success, set boot partition, delete `/update.bin`, reboot.
+3. On success, set boot partition, delete `/firmware.bin`, reboot.
 
-Requires the dual-OTA partition table (`partitions.csv`). Workflow: FTP the new binary
-to SD as `update.bin`, then run `update`.
+`update ota` is the network path (§11.1). Both require the dual-OTA partition table
+(`partitions.csv`). Offline workflow: FTP the new binary to SD as `firmware.bin`, then
+run `update local`.
 
-### 11.1 OTA from GitHub **[RESOLVED: in scope for v1; a second source alongside SD]**
+### 11.1 Network OTA **[RESOLVED: in scope for v1; a second source alongside SD]**
 
-`esp_https_ota` streams a release asset straight into the inactive slot. Two forms:
-`update github` (fetch the latest release for the `otaRepo` slug in config, §7) and
-`update <url>` (arbitrary HTTPS binary). Caveats to design around:
+`esp_https_ota` streams a firmware image straight into the inactive slot. The release
+binary and a version marker are **plain files committed to the `otaRepo` repository**
+(not GitHub *release assets* — this dodges the Releases-API rate limits and its
+asset-download CDN redirects). Two forms:
 
-- **HTTPS is required.** GitHub release download URLs **302-redirect** to a CDN
-  (`objects.githubusercontent.com` / S3), so the client must **follow redirects** and
-  validate certs against a CA bundle — use the ESP-IDF **`esp_crt_bundle`** rather than
-  pinning one host cert (the CDN host and its cert can change). This adds TLS RAM
-  pressure during the update.
-- **Version check:** hit the GitHub API
-  (`/repos/<owner>/<repo>/releases/latest`) to compare tag vs. the running `version`
-  before downloading; skip if already current.
-- **Rate limits / offline:** unauthenticated API calls are rate-limited and the box may
-  have no internet — so this **supplements**, does not replace, the SD `update.bin`
-  path in §11, which stays the primary/offline mechanism.
-- **Config:** repo slug in NVS `otaRepo` (§7), `owner/repo` form (optionally a token
-  for private repos later); keep the whole feature behind WiFi being up.
+- **`update ota`** — pull from the configured repo. Fetch
+  `https://raw.githubusercontent.com/<otaRepo>/master/ota/version.txt`, parse the
+  `major.minor.patch` it holds, and compare to the running `version`. If it is newer,
+  stream `https://raw.githubusercontent.com/<otaRepo>/master/ota/firmware.bin` into
+  the inactive slot; if not, report "already up to date" and stop.
+- **`update <url>`** — flash an explicit image (undocumented; not shown in `help`). The
+  URL may be `https://` (any HTTPS binary, no version check) or `tnfs://` (served by the
+  M9 TNFS client — reported unavailable until that lands). No repo/version logic.
 
-**Build order:** SD-based OTA (§11) lands first since it's simplest; `update github` /
-`update <url>` build on it once networking is up. Both share the same OTA writer +
-verify + set-boot-partition + reboot backend, so the network path is mostly the
-`esp_https_ota` front end plus the release-lookup step.
+Notes:
+- **TLS.** `raw.githubusercontent.com` serves repo files directly (HTTP 200, no redirect
+  to a release-asset CDN), so certs validate against the ESP-IDF **`esp_crt_bundle`** CA
+  roots with nothing host-pinned. Adds some TLS RAM pressure during the update.
+- **`otaRepo`** (§7) is `owner/repo`, defaulting to this project's own repo so
+  `update ota` works out of the box; the locked CLI set (§8.1) has no command to change
+  it, so a fork points elsewhere by rebuilding with a different default (or `wipe`+reflash).
+- **Release layout.** Cutting a release commits `ota/version.txt` (one `x.y.z` line, in
+  sync with `include/version.h`) and `ota/firmware.bin` to `master`.
+- **Offline.** Network OTA **supplements**, does not replace, the SD `firmware.bin` path in
+  §11, which stays the primary/offline mechanism; the whole feature is gated on WiFi up.
+
+**Build order:** SD-based OTA (§11) lands first since it's simplest; `update ota` /
+`update <url>` build on it once networking is up. All share one OTA writer + verify +
+set-boot-partition + reboot backend, so the network path is mostly the `esp_https_ota`
+front end plus the version-marker check.
 
 ---
 

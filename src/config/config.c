@@ -46,7 +46,11 @@ static void set_defaults(void)
     strcpy(s_cfg.time_zone, "UTC0");
     strcpy(s_cfg.ftp_user, "fdc");
     strcpy(s_cfg.ftp_pass, "fdc");
-    /* ota_repo empty; drives empty */
+    /* Network OTA source repo (DESIGN.md §7/§11.1). The locked CLI set has no command
+     * to set this, so it defaults to the project's own repo — `update ota` then works
+     * out of the box, pulling ota/version.txt + ota/firmware.bin from its master. */
+    strcpy(s_cfg.ota_repo, "deltecent/fdc-sds-pio");
+    /* drives empty */
 }
 
 /* Load one string key into dst (leaving the default in place if absent). */

@@ -19,3 +19,10 @@ CONFIG_FREERTOS_HZ=1000
 # fails. LFN buffer on the heap (not the stack); 255-char max covers our names.
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
+
+# Network OTA (DESIGN.md §11.1): esp_https_ota validates the release server's TLS cert
+# against the bundled CA roots (esp_crt_bundle) rather than a pinned cert. The bundle is
+# on by default; make it explicit and use the full root set so raw.githubusercontent.com
+# (and any CDN it fronts) verifies.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
