@@ -1,9 +1,9 @@
 /*
  * main.cpp — app entry point and boot sequence for the FDC+ Serial Disk Server.
  *
- * M0 skeleton (build plan): bring up the console, print the version banner, and
- * run the LED lamp test (DESIGN.md §12 steps 1-2). Later milestones add SD,
- * config, the disk module, the FDC engine, and networking to app_main.
+ * M0: bring up the console, print the version banner, run the LED lamp test
+ * (DESIGN.md §12 steps 1-2). M1: start the serial CLI task. Later milestones add
+ * SD, config, the disk module, the FDC engine, and networking to app_main.
  */
 #include <stddef.h>
 #include <stdio.h>
@@ -13,6 +13,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 
+#include "cli.h"
 #include "pins.h"
 #include "version.h"
 
@@ -72,5 +73,8 @@ extern "C" void app_main(void)
     leds_init();
     led_lamp_test();
 
-    ESP_LOGI(TAG, "M0 skeleton boot complete");
+    ESP_LOGI(TAG, "boot complete; starting serial CLI");
+
+    cli_init();
+    cli_serial_start();
 }
