@@ -106,7 +106,13 @@ void cli_dispatch(cli_console_t *c, char *line)
     char *argv[CLI_MAX_ARGS];
     int argc = 0;
 
-    /* Tokenize in place on runs of spaces/tabs. */
+    /*
+     * Tokenize in place on runs of spaces/tabs. A "double-quoted" run keeps its
+     * spaces and the quotes are stripped, so a filename with a space works both
+     * interactively and in batch files — e.g. `mount 1 "BLANK 8MB.DSK"` (§8.2).
+     * Each token is compacted onto itself (dst never runs ahead of the read cursor
+     * p, since stripping quotes only makes dst lag), so no extra buffer is needed.
+     */
     char *p = line;
     while (*p && argc < CLI_MAX_ARGS) {
         while (*p == ' ' || *p == '\t') {
@@ -115,13 +121,24 @@ void cli_dispatch(cli_console_t *c, char *line)
         if (!*p) {
             break;
         }
-        argv[argc++] = p;
-        while (*p && *p != ' ' && *p != '\t') {
-            ++p;
+        char *dst = p;
+        argv[argc++] = dst;
+        bool in_quote = false;
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                ++p;
+                continue;
+            }
+            if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            }
+            *dst++ = *p++;
         }
         if (*p) {
-            *p++ = '\0';
+            ++p; /* step past the delimiter before the next token */
         }
+        *dst = '\0';
     }
 
     if (argc == 0) {
@@ -130,6 +147,10 @@ void cli_dispatch(cli_console_t *c, char *line)
 
     const cli_command_t *cmd = cli_match(argv[0]);
     if (cmd == NULL) {
+        /* Unknown token: auto-run it if it names an SD batch file (DESIGN.md §8.2). */
+        if (cli_try_autorun(c, argv[0])) {
+            return;
+        }
         cli_printf(c, "%s: unknown command (try 'help')\r\n", argv[0]);
         return;
     }
@@ -223,6 +244,9 @@ static void cli_serial_task(void *arg)
     (void)arg;
     static cli_console_t con;
     cli_console_init(&con, serial_write, (void *)(intptr_t)UART_NUM_0, true);
+
+    /* §12 step 8: run /autoexec.bat (if present) before the first prompt. */
+    cli_run_autoexec(&con);
 
     cli_prompt(&con);
 

@@ -8,8 +8,9 @@
  * commands stay stubbed and are filled in by later milestones. M4 wires the FDC+
  * engine into the CLI: stats/clear, loopback, and live baud application. M5 added the
  * net/time commands (wifi/ssid/pass/time/tz/logout) and M6 the FTP credentials
- * (ftpuser/ftppass). M7 wires in `update` (SD / network OTA, §11). The remaining stub
- * is exec (M8).
+ * (ftpuser/ftppass). M7 wires in `update` (SD / network OTA, §11). M8 fills in the last
+ * command, `exec`/`run` (batch files, §8.2), plus the `.bat` auto-run and boot-time
+ * /autoexec.bat hooks the CLI dispatcher and serial task call into.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +63,7 @@ static int cmd_logout(cli_console_t *c, int argc, char **argv);
 static int cmd_ftpuser(cli_console_t *c, int argc, char **argv);
 static int cmd_ftppass(cli_console_t *c, int argc, char **argv);
 static int cmd_update(cli_console_t *c, int argc, char **argv);
-static int cmd_stub(cli_console_t *c, int argc, char **argv);
+static int cmd_exec(cli_console_t *c, int argc, char **argv);
 
 /* Order here is the order `help` prints. */
 static const cli_command_t k_commands[] = {
@@ -85,7 +86,7 @@ static const cli_command_t k_commands[] = {
     { "ftppass",  NULL,     "Set FTP password",               cmd_ftppass  },
     { "update",   NULL,     "Firmware: status, or 'local'/'ota' to install", cmd_update },
     { "type",     "cat",    "Print a text file",              cmd_type     },
-    { "exec",     "run",    "Run a batch file of commands",   cmd_stub     },
+    { "exec",     "run",    "Run a batch file of commands",   cmd_exec     },
     { "logout",   "exit",   "Disconnect network client",      cmd_logout   },
     { "delete",   "rm",     "Delete a file",                  cmd_delete   },
     { "rename",   "mv",     "Rename a file",                  cmd_rename   },
@@ -840,8 +841,136 @@ static int cmd_update(cli_console_t *c, int argc, char **argv)
     return ota_update_url(c, argv[1]) == ESP_OK ? 0 : 1;
 }
 
-static int cmd_stub(cli_console_t *c, int argc, char **argv)
+/* ---- M8: batch files (exec/run, .bat auto-run, /autoexec.bat) — §8.2 -------- */
+
+/* Cap batch nesting so a batch file that exec's itself can't recurse forever. */
+#define BATCH_MAX_DEPTH 4
+
+static bool file_is_regular(const char *path)
 {
-    cli_printf(c, "%s: not yet implemented\r\n", argv[0]);
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/*
+ * Resolve a batch name to an absolute SD path: try `name` as given, then `name.bat`
+ * (unless it already ends in .bat). Fills buf and returns true when a regular file
+ * exists; returns false (no SD, bad name, or not found) otherwise.
+ */
+static bool batch_path(const char *name, char *buf, size_t len)
+{
+    if (!sd_mounted()) {
+        return false;
+    }
+    if (sd_path(name, buf, len) >= 0 && file_is_regular(buf)) {
+        return true;
+    }
+    size_t nl = strlen(name);
+    bool has_bat = (nl >= 4) && strcasecmp(name + nl - 4, ".bat") == 0;
+    if (!has_bat) {
+        char withext[CONFIG_FILE_CAP + 8];
+        snprintf(withext, sizeof withext, "%s.bat", name);
+        if (sd_path(withext, buf, len) >= 0 && file_is_regular(buf)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Feed a resolved batch file to the parser one line at a time. Blank lines are
+ * skipped; '#' lines echo as comments (§8.2); every command line is echoed before it
+ * runs so the transcript (and the boot autoexec) shows what happened. cli_dispatch
+ * tokenizes in place, so each line is copied out of the file into a scratch buffer.
+ */
+static void run_batch_file(cli_console_t *c, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        cli_printf(c, "exec: %s: %s\r\n", path, strerror(errno));
+        return;
+    }
+    char buf[CLI_LINE_MAX + 2];
+    while (fgets(buf, sizeof buf, f)) {
+        size_t n = strlen(buf);
+        bool complete = (n > 0 && buf[n - 1] == '\n');
+        while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+            buf[--n] = '\0';
+        }
+        if (!complete) {
+            /* Line longer than the editor buffer: drop the remainder and warn. */
+            int ch;
+            while ((ch = fgetc(f)) != EOF && ch != '\n') {
+                /* discard */
+            }
+            cli_write(c, "exec: line too long, skipped\r\n");
+            continue;
+        }
+        char *p = buf;
+        while (*p == ' ' || *p == '\t') {
+            ++p;
+        }
+        if (*p == '\0') {
+            continue; /* blank line */
+        }
+        cli_printf(c, "%s\r\n", p); /* echo the line (comment or command) */
+        if (*p == '#') {
+            continue; /* comment: echoed above, nothing to run */
+        }
+        cli_dispatch(c, p);
+    }
+    fclose(f);
+}
+
+/* Run a resolved path under the nesting guard. */
+static void batch_exec_path(cli_console_t *c, const char *path)
+{
+    if (c->exec_depth >= BATCH_MAX_DEPTH) {
+        cli_write(c, "exec: batch files nested too deep\r\n");
+        return;
+    }
+    c->exec_depth++;
+    run_batch_file(c, path);
+    c->exec_depth--;
+}
+
+int cli_exec_batch(cli_console_t *c, const char *name)
+{
+    char path[16 + CONFIG_FILE_CAP];
+    if (!batch_path(name, path, sizeof path)) {
+        cli_printf(c, "%s: not found\r\n", name);
+        return 1;
+    }
+    batch_exec_path(c, path);
     return 0;
+}
+
+bool cli_try_autorun(cli_console_t *c, const char *name)
+{
+    char path[16 + CONFIG_FILE_CAP];
+    if (!batch_path(name, path, sizeof path)) {
+        return false; /* not a batch file — let the caller report "unknown command" */
+    }
+    batch_exec_path(c, path);
+    return true;
+}
+
+void cli_run_autoexec(cli_console_t *c)
+{
+    char path[16 + CONFIG_FILE_CAP];
+    if (!sd_mounted() || sd_path("autoexec.bat", path, sizeof path) < 0 ||
+        !file_is_regular(path)) {
+        return; /* silent when absent (§8.2 "if present") */
+    }
+    cli_write(c, "running /autoexec.bat\r\n");
+    batch_exec_path(c, path);
+}
+
+static int cmd_exec(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_write(c, "usage: exec <file>\r\n");
+        return 1;
+    }
+    return cli_exec_batch(c, argv[1]) == 0 ? 0 : 1;
 }

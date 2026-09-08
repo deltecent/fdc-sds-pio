@@ -39,6 +39,7 @@ struct cli_console {
     void        *ctx;                /* passed back to write() */
     bool         echo;              /* echo typed chars (serial: on; TCP: off, §9.2) */
     bool         disconnect;        /* set by logout/exit + Ctrl-D; net loop honors it */
+    int          exec_depth;        /* batch-file nesting depth (exec/autorun, §8.2) */
     size_t       len;               /* bytes currently in line[] */
     bool         saw_cr;            /* last byte was CR, for CRLF collapse */
     char         line[CLI_LINE_MAX + 1];
@@ -76,6 +77,19 @@ void cli_prompt(cli_console_t *c);
 
 /* Tokenize and dispatch a NUL-terminated line (also reused by exec/batch). */
 void cli_dispatch(cli_console_t *c, char *line);
+
+/*
+ * Batch files (DESIGN.md §8.2), implemented in commands.c:
+ *  - cli_exec_batch: run `name` (or `name.bat`) from SD, one line per command; '#'
+ *    lines echo as comments. Reports "not found" when missing. (the `exec`/`run` cmd)
+ *  - cli_try_autorun: if an unknown token names a batch file on SD (ends in .bat, or a
+ *    `<name>.bat` exists), run it; returns true when handled as a batch.
+ *  - cli_run_autoexec: at boot, run /autoexec.bat if present (silent when absent).
+ * All honor a small per-console nesting limit so a self-exec'ing batch can't recurse.
+ */
+int  cli_exec_batch(cli_console_t *c, const char *name);
+bool cli_try_autorun(cli_console_t *c, const char *name);
+void cli_run_autoexec(cli_console_t *c);
 
 /* Start the serial (UART0) console task. */
 void cli_serial_start(void);
