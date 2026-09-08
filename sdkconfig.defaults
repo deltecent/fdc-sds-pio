@@ -13,3 +13,9 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 # Keep both cores (default): the fdc task pins to core 1, net/cli live on core 0
 # (DESIGN.md §5.2). A 1 kHz tick gives finer resolution for FDC timeouts/LEDs.
 CONFIG_FREERTOS_HZ=1000
+
+# FATFS long filenames (DESIGN.md §10: image names up to 64 chars). Without this,
+# readdir/open only see mangled 8.3 names (CPM22-~1.DSK) and `mount <longname>`
+# fails. LFN buffer on the heap (not the stack); 255-char max covers our names.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

@@ -22,8 +22,8 @@ extern "C" {
 #define CLI_LINE_MAX 80
 #define CLI_MAX_ARGS 8
 
-/* M1 prompt is fixed. M2 replaces this with wifiName + a dirty marker. */
-#define CLI_PROMPT "FDC-SDS-ESP32> "
+/* The prompt is built at runtime from wifiName + the dirty marker (config_prompt). */
+#define CLI_PROMPT_MAX 48 /* "* " + wifiName(≤40) + "> " + NUL */
 
 typedef struct cli_console cli_console_t;
 

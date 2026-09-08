@@ -2,8 +2,9 @@
  * main.cpp — app entry point and boot sequence for the FDC+ Serial Disk Server.
  *
  * M0: bring up the console, print the version banner, run the LED lamp test
- * (DESIGN.md §12 steps 1-2). M1: start the serial CLI task. Later milestones add
- * SD, config, the disk module, the FDC engine, and networking to app_main.
+ * (DESIGN.md §12 steps 1-2). M1: start the serial CLI task. M2: mount the SD card
+ * (§12 step 3) and load config from NVS (§12 step 4). Later milestones add the
+ * disk module, the FDC engine, and networking to app_main.
  */
 #include <stddef.h>
 #include <stdio.h>
@@ -14,7 +15,9 @@
 #include "esp_log.h"
 
 #include "cli.h"
+#include "config.h"
 #include "pins.h"
+#include "sd.h"
 #include "version.h"
 
 static const char *TAG = "main";
@@ -72,6 +75,14 @@ extern "C" void app_main(void)
 
     leds_init();
     led_lamp_test();
+
+    /* §12 step 3: mount SD (non-fatal — file commands report if absent). */
+    if (sd_mount() != ESP_OK) {
+        ESP_LOGW(TAG, "SD not mounted; file commands unavailable");
+    }
+
+    /* §12 step 4: load persistent config (defaults if NVS is empty). */
+    ESP_ERROR_CHECK(config_init());
 
     ESP_LOGI(TAG, "boot complete; starting serial CLI");
 

@@ -18,6 +18,7 @@
 #include "esp_log.h"
 
 #include "cli.h"
+#include "config.h"
 
 static const char *TAG = "cli";
 
@@ -54,7 +55,9 @@ void cli_printf(cli_console_t *c, const char *fmt, ...)
 
 void cli_prompt(cli_console_t *c)
 {
-    cli_write(c, CLI_PROMPT);
+    char prompt[CLI_PROMPT_MAX];
+    config_prompt(prompt, sizeof prompt);
+    cli_write(c, prompt);
 }
 
 /* ---- command matching ------------------------------------------------------ */
