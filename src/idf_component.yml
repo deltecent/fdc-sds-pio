@@ -1,0 +1,17 @@
+# ESP-IDF Component Manager manifest for the main component.
+#
+# Managed (ESP Component Registry) dependencies are declared here; the manager
+# downloads them into managed_components/ at build time. Community/vendored *source*
+# components (e.g. the FTP server, DESIGN.md §5.3/§9.4) live under lib/ instead.
+#
+# Versions are pinned to an exact release per the policy in DESIGN.md §5.3.
+
+dependencies:
+  # Core ESP-IDF (pure-espidf framework, no Arduino — DESIGN.md §3).
+  idf:
+    version: ">=5.0"
+
+  # mDNS: advertise <wifiName>.local + telnet/ftp service records so clients reach
+  # the box by name instead of its DHCP IP (DESIGN.md §9.1). Apache-2.0.
+  espressif/mdns:
+    version: "==1.12.0"

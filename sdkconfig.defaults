@@ -1,0 +1,15 @@
+# ESP-IDF build defaults for the FDC+ Serial Disk Server (M0 baseline).
+#
+# PlatformIO regenerates sdkconfig from this file; edit here, not sdkconfig
+# (which is git-ignored). Tuned further at M4 (FDC timing) per the build plan.
+
+# Run the CPU at full speed — high-baud FDC UART + inline SD track I/O.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Console on UART0 (USB) at 115200 8N1 (DESIGN.md §2.1).
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# Keep both cores (default): the fdc task pins to core 1, net/cli live on core 0
+# (DESIGN.md §5.2). A 1 kHz tick gives finer resolution for FDC timeouts/LEDs.
+CONFIG_FREERTOS_HZ=1000
