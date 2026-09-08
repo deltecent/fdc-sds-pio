@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
+#include "driver/uart_vfs.h"
 #include "esp_log.h"
 
 #include "cli.h"
@@ -206,8 +207,15 @@ void cli_feed(cli_console_t *c, char ch)
 
 static void serial_write(void *ctx, const char *data, size_t len)
 {
-    uart_port_t port = (uart_port_t)(intptr_t)ctx;
-    uart_write_bytes(port, data, len);
+    (void)ctx;
+    /* Write through stdout, NOT uart_write_bytes: printf/ESP_LOG also write to
+     * stdout, so newlib's per-FILE lock then serialises our line-editor echo
+     * against concurrent log output — neither can drop or interleave the other's
+     * bytes. (uart_write_bytes is a separate entry point that bypasses that lock,
+     * which let a keystroke echo be lost when a log burst — e.g. WiFi connect —
+     * landed at the same instant.) */
+    fwrite(data, 1, len, stdout);
+    fflush(stdout);
 }
 
 static void cli_serial_task(void *arg)
@@ -230,10 +238,17 @@ static void cli_serial_task(void *arg)
 void cli_serial_start(void)
 {
     /* UART0 is already the console (configured by the bootloader/menuconfig).
-     * Install a driver so we can read raw bytes via uart_read_bytes; printf and
-     * ESP_LOG keep writing over the same port. RX buffer only (no TX ring). */
+     * Install a driver so we can read raw bytes via uart_read_bytes, give it a TX
+     * ring buffer, and route stdout/stderr through it (uart_vfs_dev_use_driver).
+     * All console output — our prompt/echo (serial_write goes via stdout) AND
+     * printf/ESP_LOG — then flows through the one stdout FILE, whose lock serialises
+     * writers, into one driver-drained TX stream. Line-buffered so whole log lines
+     * flush at once (less lock churn) while echo flushes immediately via fflush.
+     * Without this, a log burst landing next to a keystroke could drop the echo. */
     if (!uart_is_driver_installed(UART_NUM_0)) {
-        ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
+        ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 512, 0, NULL, 0));
+        uart_vfs_dev_use_driver(UART_NUM_0);
+        setvbuf(stdout, NULL, _IOLBF, 256);
     }
     xTaskCreatePinnedToCore(cli_serial_task, "cli", 4096, NULL, 5, NULL, 0);
 }
