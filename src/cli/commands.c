@@ -1,10 +1,11 @@
 /*
  * commands.c — the locked v1 command table (DESIGN.md §8.1) and its handlers.
  *
- * M1 implemented help/?, version, reboot. M2 adds the SD/config commands:
+ * M1 implemented help/?, version, reboot. M2 added the SD/config commands:
  * dir/ls, type/cat, delete/rm, rename/mv, copy/cp, save/write, wipe, hostname,
- * and baud (store-only until the FDC UART lands at M4). The remaining commands
- * stay stubbed and are filled in by later milestones (M4 FDC, M5 net/time,
+ * and baud (store-only until the FDC UART lands at M4). M3 adds the disk-module
+ * commands mount/unmount and dump, plus the `dir <spec>` glob (§8.4). The remaining
+ * commands stay stubbed and are filled in by later milestones (M4 FDC, M5 net/time,
  * M6 FTP creds, M7 update).
  */
 #include <stdio.h>
@@ -22,13 +23,18 @@
 
 #include "cli.h"
 #include "config.h"
+#include "disk.h"
 #include "sd.h"
 #include "version.h"
+#include "wildcard.h"
 
 static int cmd_help(cli_console_t *c, int argc, char **argv);
 static int cmd_version(cli_console_t *c, int argc, char **argv);
 static int cmd_reboot(cli_console_t *c, int argc, char **argv);
 static int cmd_dir(cli_console_t *c, int argc, char **argv);
+static int cmd_mount(cli_console_t *c, int argc, char **argv);
+static int cmd_unmount(cli_console_t *c, int argc, char **argv);
+static int cmd_dump(cli_console_t *c, int argc, char **argv);
 static int cmd_type(cli_console_t *c, int argc, char **argv);
 static int cmd_delete(cli_console_t *c, int argc, char **argv);
 static int cmd_rename(cli_console_t *c, int argc, char **argv);
@@ -44,14 +50,14 @@ static const cli_command_t k_commands[] = {
     { "help",     "?",      "Show command help",              cmd_help     },
     { "version",  NULL,     "Show firmware version",          cmd_version  },
     { "baud",     NULL,     "Set FDC+ baud rate",             cmd_baud     },
-    { "dir",      "ls",     "List SD root (name + size)",     cmd_dir      },
-    { "mount",    NULL,     "Show mount table / mount image", cmd_stub     },
-    { "unmount",  "umount", "Unmount a drive",                cmd_stub     },
+    { "dir",      "ls",     "List SD files [glob spec]",      cmd_dir      },
+    { "mount",    NULL,     "Show mount table / mount image", cmd_mount    },
+    { "unmount",  "umount", "Unmount a drive",                cmd_unmount  },
     { "stats",    NULL,     "Show statistics",                cmd_stub     },
     { "clear",    NULL,     "Zero statistics",                cmd_stub     },
     { "save",     "write",  "Persist config to NVS",          cmd_save     },
     { "wipe",     NULL,     "Erase NVS, reload defaults",     cmd_wipe     },
-    { "dump",     NULL,     "Hex-dump current track buffer",  cmd_stub     },
+    { "dump",     NULL,     "Hex-dump a track buffer",        cmd_dump     },
     { "wifi",     NULL,     "Show/enable/disable WiFi",       cmd_stub     },
     { "ssid",     NULL,     "Set WiFi SSID",                  cmd_stub     },
     { "pass",     NULL,     "Set WiFi password",              cmd_stub     },
@@ -158,8 +164,10 @@ static int cmd_reboot(cli_console_t *c, int argc, char **argv)
 
 static int cmd_dir(cli_console_t *c, int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    /* Optional glob filter, e.g. `dir *.BAT` (DESIGN.md §8.4). */
+    const char *spec = (argc > 1) ? argv[1] : NULL;
+    const bool spec_is_dot = spec && spec[0] == '.';
+
     if (!sd_mounted()) {
         cli_write(c, "no SD card\r\n");
         return 1;
@@ -175,8 +183,12 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
     uint32_t total = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
-        if (e->d_name[0] == '.') {
-            continue; /* hide dotfiles (DESIGN.md §8.1) */
+        /* Hide dotfiles (DESIGN.md §8.1) unless the spec itself starts with '.' (§8.4). */
+        if (e->d_name[0] == '.' && !spec_is_dot) {
+            continue;
+        }
+        if (spec && !wildcard_match_ci(spec, e->d_name)) {
+            continue;
         }
         char path[16 + CONFIG_FILE_CAP];
         if (sd_path(e->d_name, path, sizeof path) < 0) {
@@ -193,6 +205,153 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
     closedir(d);
 
     cli_printf(c, "%u file(s), %lu bytes\r\n", files, (unsigned long)total);
+    return 0;
+}
+
+/* Map a disk_mount() error code to a friendly console message. */
+static void report_mount_err(cli_console_t *c, const char *name, esp_err_t err)
+{
+    switch (err) {
+    case ESP_ERR_INVALID_STATE: cli_write(c, "no SD card\r\n"); break;
+    case ESP_ERR_INVALID_ARG:   cli_printf(c, "%s: invalid filename\r\n", name); break;
+    case ESP_ERR_NOT_FOUND:     cli_printf(c, "%s: not found\r\n", name); break;
+    case ESP_ERR_NO_MEM:        cli_write(c, "out of memory\r\n"); break;
+    default: cli_printf(c, "mount failed: %s\r\n", esp_err_to_name(err)); break;
+    }
+}
+
+/* Parse a drive-number arg into 0..MAX_DRIVE-1; report and return -1 on error. */
+static int parse_drive(cli_console_t *c, const char *arg)
+{
+    char *end;
+    long drive = strtol(arg, &end, 10);
+    if (*end != '\0' || drive < 0 || drive >= CONFIG_MAX_DRIVE) {
+        cli_printf(c, "drive must be 0..%d\r\n", CONFIG_MAX_DRIVE - 1);
+        return -1;
+    }
+    return (int)drive;
+}
+
+static int cmd_mount(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        for (int i = 0; i < CONFIG_MAX_DRIVE; ++i) {
+            if (disk_is_mounted(i)) {
+                cli_printf(c, "%d: %s (%lu bytes)\r\n", i, disk_name(i),
+                           (unsigned long)disk_image_size(i));
+            } else {
+                cli_printf(c, "%d: (empty)\r\n", i);
+            }
+        }
+        return 0;
+    }
+    if (argc < 3) {
+        cli_write(c, "usage: mount <drive> <file>\r\n");
+        return 1;
+    }
+
+    int drive = parse_drive(c, argv[1]);
+    if (drive < 0) {
+        return 1;
+    }
+
+    esp_err_t err = disk_mount(drive, argv[2]);
+    if (err != ESP_OK) {
+        report_mount_err(c, argv[2], err);
+        return 1;
+    }
+    /* Persist the mount so `save` + reboot auto-mounts it (DESIGN.md §7/§12). */
+    config_set_drive(drive, argv[2]);
+    cli_printf(c, "drive %d: %s (%lu bytes)\r\n", drive, argv[2],
+               (unsigned long)disk_image_size(drive));
+    return 0;
+}
+
+static int cmd_unmount(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_write(c, "usage: unmount <drive>\r\n");
+        return 1;
+    }
+    int drive = parse_drive(c, argv[1]);
+    if (drive < 0) {
+        return 1;
+    }
+    if (!disk_is_mounted(drive)) {
+        cli_printf(c, "drive %d not mounted\r\n", drive);
+        return 1;
+    }
+    disk_unmount(drive);
+    config_set_drive(drive, NULL);
+    cli_printf(c, "drive %d unmounted\r\n", drive);
+    return 0;
+}
+
+#define DUMP_DEFAULT_LEN 256
+
+/* One 16-byte hex+ASCII line (xxd-like, for eyeball cross-checks against `xxd`). */
+static void dump_line(cli_console_t *c, uint32_t off, const uint8_t *p, size_t n)
+{
+    char line[96];
+    int k = snprintf(line, sizeof line, "%08lx: ", (unsigned long)off);
+    for (size_t i = 0; i < 16; ++i) {
+        if (i < n) {
+            k += snprintf(line + k, sizeof line - (size_t)k, "%02x ", p[i]);
+        } else {
+            k += snprintf(line + k, sizeof line - (size_t)k, "   ");
+        }
+    }
+    line[k++] = ' ';
+    for (size_t i = 0; i < n; ++i) {
+        line[k++] = (p[i] >= 32 && p[i] < 127) ? (char)p[i] : '.';
+    }
+    line[k++] = '\r';
+    line[k++] = '\n';
+    cli_writen(c, line, (size_t)k);
+}
+
+static int cmd_dump(cli_console_t *c, int argc, char **argv)
+{
+    /*
+     * Normally the FDC READ/WRIT path fills the shared track buffer and `dump` shows
+     * it. Until the FDC engine lands (M4) — and to cross-check offset math against
+     * `xxd` — `dump [drive [track [len]]]` reads a track first (defaults: drive 0,
+     * track 0, 256 bytes). Bare `dump` shows the current buffer, or reads the default
+     * if the buffer is still empty.
+     */
+    if (argc > 1) {
+        int drive = parse_drive(c, argv[1]);
+        if (drive < 0) {
+            return 1;
+        }
+        uint32_t track = (argc > 2) ? (uint32_t)strtoul(argv[2], NULL, 0) : 0;
+        size_t len = (argc > 3) ? (size_t)strtoul(argv[3], NULL, 0) : DUMP_DEFAULT_LEN;
+        esp_err_t err = disk_read_track(drive, track, len);
+        if (err != ESP_OK) {
+            cli_printf(c, "dump: read failed: %s\r\n", esp_err_to_name(err));
+            return 1;
+        }
+    }
+
+    int drive;
+    uint32_t track;
+    size_t len;
+    const uint8_t *buf = disk_track_buffer(&drive, &track, &len);
+    if (len == 0) {
+        /* Nothing cached and no args — read the default track from drive 0. */
+        if (disk_read_track(0, 0, DUMP_DEFAULT_LEN) != ESP_OK) {
+            cli_write(c, "dump: no track loaded (mount a drive first)\r\n");
+            return 1;
+        }
+        buf = disk_track_buffer(&drive, &track, &len);
+    }
+
+    cli_printf(c, "drive %d track %lu, %lu bytes:\r\n", drive, (unsigned long)track,
+               (unsigned long)len);
+    for (size_t off = 0; off < len; off += 16) {
+        size_t n = (len - off < 16) ? (len - off) : 16;
+        dump_line(c, (uint32_t)off, buf + off, n);
+    }
     return 0;
 }
 

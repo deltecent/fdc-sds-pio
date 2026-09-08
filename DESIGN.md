@@ -38,6 +38,17 @@ In scope for v1:
 Out of scope for v1 (deferred): access-point provisioning mode, web UI, multiple
 simultaneous Telnet clients, >4 drives, disk-image format conversion.
 
+### Documentation
+
+All user- and developer-facing documentation produced for this project (guides,
+protocol notes, build/flash instructions, CLI reference, etc.) is authored to live
+on this repository's **GitHub Wiki**
+(<https://github.com/deltecent/fdc-sds-pio/wiki>), not as loose Markdown files in the
+tree. `DESIGN.md` remains the in-repo spec / single source of truth; everything else
+is written as, and formatted for, wiki pages. The wiki is a git repo
+(`https://github.com/deltecent/fdc-sds-pio.wiki.git`) and its **Home** page has been
+initialized, so pages can be cloned, edited, committed, and pushed like any repo.
+
 ### Reference material
 
 - `../fdc-sds-esp32/` — the original Arduino firmware and its `DESIGN.md`
@@ -141,7 +152,7 @@ fdc-sds-pio/
 | Module | Responsibility | Key API (sketch) |
 |---|---|---|
 | `config` | Load/save settings in NVS; defaults; dirty flag | `config_load()`, `config_save()`, `config_wipe()`, accessors |
-| `disk` | Mount/unmount images, open File handles, dir listing, track read/write at offset | `disk_mount(n, path)`, `disk_unmount(n)`, `disk_read_track()`, `disk_write_track()`, `disk_status_bitmap()` |
+| `disk` | Mount/unmount images (SD **or** TNFS backing, §10.1), open handles, dir listing, track read/write at offset | `disk_mount(n, path)`, `disk_unmount(n)`, `disk_read_track()`, `disk_write_track()`, `disk_status_bitmap()` |
 | `fdc` | UART framing, checksums, STAT/READ/WRIT/WSTA, timeout timer, LEDs, stats | `fdc_init()`, `fdc_poll()` |
 | `cli` | Line editor, command table, dispatch, shared across consoles | `cli_init()`, `cli_feed(stream, ch)` / `cli_poll(console)` |
 | `net` | WiFi STA connect, Telnet server, FTP server, NTP, events | `net_init()`, `net_poll()` |
@@ -328,13 +339,16 @@ v1 schema (namespace `fdcsds`):
 | `ftpUser` | string(≤32) | FTP username *(see §9.4)* | `fdc` |
 | `ftpPass` | string(≤32) | FTP password *(see §9.4)* | `fdc` |
 | `otaRepo` | string(≤64) | GitHub `owner/repo` for network OTA *(see §11.1)* | empty |
-| `Drive0`…`Drive3` | string(≤64) | mounted image filename | empty |
+| `Drive0`…`Drive3` | string(≤128) | mounted image: SD filename **or** `tnfs://` URL (§10.1) | empty |
 
 Rules:
 - Changes are in-memory until an explicit **`save`**; a **dirty flag** shows a leading
   `* ` in the prompt.
 - **`wipe`** erases NVS and reloads defaults.
-- At boot, re-mount each drive whose `Drive<n>` filename is set.
+- At boot, re-mount each drive whose `Drive<n>` filename is set. A `Drive<n>` holding a
+  `tnfs://` URL is mounted after WiFi connects, not at boot (§10.1 / §12).
+- The `Drive<n>` value cap is **128** (not 64) so it can hold a full `tnfs://` URL; the
+  SD-filename cap stays 64 chars (§10).
 - `wifiName` doubles as WiFi hostname and CLI prompt prefix (e.g. `FDC-SDS-ESP32>`).
 
 ---
@@ -371,8 +385,8 @@ needed.
 |---|---|---|
 | `help` / `?` | — | Command help |
 | `baud` | rate | Set FDC+ baud rate |
-| `dir` / `ls` | — | List SD root (name + size; hide dotfiles) |
-| `mount` | — \| drive file | Show mount table / mount image on drive 0–3 |
+| `dir` / `ls` | — \| spec | List SD root (name + size; hide dotfiles); optional glob `spec` filters (e.g. `*.BAT`, §8.4) |
+| `mount` | — \| drive file\|url | Show mount table / mount on drive 0–3: SD file **or** `tnfs://` URL (§10.1) |
 | `unmount` / `umount` | drive | Unmount a drive |
 | `stats` | — | Baud + STAT/READ/WRIT/ERR/TOUT counters + last-op strings |
 | `clear` | — | Zero statistics |
@@ -393,16 +407,20 @@ needed.
 | `logout` / `exit` | — | Disconnect Telnet client |
 | `delete` / `rm` | file | Delete a file |
 | `rename` / `mv` | old new | Rename a file |
-| `copy` / `cp` | src dst | Copy a file (pump FDC while copying) |
+| `copy` / `cp` | src dst | Copy a file (chunked I/O, §5.2); `src`/`dst` may be an SD name **or** a `tnfs://` URL (§10.1) |
 | `loopback` / `lb` | — | FDC+ serial loopback test |
 | `time` / `date` | — | Show current (UTC) time |
 | `tz` | timezone | Set/show timezone; `tz ?` lists the US zones in §8.3 |
 
 - All filename args resolve relative to SD root.
 - Bounds-check drive numbers as `0..MAX_DRIVE-1` (fix the old `> MAX_DRIVE` off-by-one).
-- Set is locked for v1. The only additions beyond the original baseline are the two
-  `ftpuser`/`ftppass` commands and the `update github|url` argument — both required by
-  the FTP-credentials and GitHub-OTA decisions above.
+- Set is locked for v1 at the level of command *names*: the only new names beyond the
+  original baseline are `ftpuser`/`ftppass`. Existing commands gained argument forms:
+  the `update github|url` argument, an optional glob `spec` on `dir`/`ls` (§8.4), a
+  `tnfs://` URL as a `mount` target, and `tnfs://` endpoints on `copy` (§10.1).
+- Wildcards apply only to `dir`/`ls`; other file commands take one explicit name in v1
+  (no glob-delete/-copy). `type`/`delete`/`rename` operate on SD only; `copy` is the one
+  file command that also accepts `tnfs://` (§10.1).
 
 ### 8.2 Batch files & AUTOEXEC
 - `exec <name>` reads `<name>` (or `<name>.bat`) from SD and feeds each line to the
@@ -432,6 +450,20 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
 
 > DST transition rules (`M3.2.0`/`M11.1.0` = 2nd Sun of Mar / 1st Sun of Nov) are the
 > current US rules; hardcoding them avoids shipping the full IANA tz database.
+
+### 8.4 Directory wildcards **[RESOLVED]**
+
+`dir`/`ls` take an optional filename `spec`. With no arg they list the whole SD root
+(hiding dotfiles, as today). With a `spec` they list only matching entries using a
+**case-insensitive glob** over the (long) filename: `*` matches any run of characters,
+`?` matches exactly one — e.g. `dir *.BAT`, `ls CPM*.DSK`, `dir ?.txt`.
+
+- Implementation: `fnmatch(spec, name, FNM_CASEFOLD)` where the toolchain provides it,
+  else a small hand-rolled `*`/`?` matcher (case-insensitive). Case-insensitivity matches
+  the CP/M / DOS `DIR *.BAT` expectation and the FAT filesystem.
+- The dotfile-hiding rule still applies unless the `spec` itself begins with `.`.
+- A `spec` that matches nothing prints the normal footer with `0 file(s)`.
+- Wildcards are a **listing** convenience only — see §8.1: no glob-delete/-copy in v1.
 
 ---
 
@@ -503,6 +535,29 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
   - Fall back to a custom implementation only if the component proves unreliable at our
     image sizes (8 MB transfers).
 
+### 9.5 TNFS client (remote disk images) **[RESOLVED: in scope for v1]**
+
+TNFS (the FujiNet **"The Network File System"**) lets an image live on a remote **TNFS
+server** instead of the SD card, addressed by a `tnfs://host[:port]/path` URL. It backs
+two features: mounting a drive from a remote image (§10.1) and `copy` to/from the server
+(§10.2). This subsection covers the transport; the disk-facing semantics are in §10.
+
+- **Protocol.** Default transport **UDP**, default port **16384**; session-based
+  (`MOUNT` → session id, then `OPEN`/`LSEEK`/`READ`/`WRITE`/`CLOSE`, `UMOUNT`),
+  little-endian, retried datagrams with a sequence byte and per-request timeout/retry.
+  Reference: the FujiNet `tnfsd` server project and its protocol document.
+- **Client — [CLAUDE — resolved: hand-roll behind `net/tnfs`].** The protocol is small
+  and there is no clean standalone IDF-native component (existing ones are entangled with
+  FujiNet firmware). Write a compact client on IDF BSD sockets behind a thin `net/tnfs`
+  glue API (per §5.3) exposing exactly what callers need: `open`, `size`, `read_at`,
+  `write_at`, `close`. One session per mounted remote drive; a transient session for a
+  `copy`.
+- **Off the `fdc` task.** lwIP/WiFi live on core 0; the `fdc` task is pinned to core 1
+  and must never block on the network (§5.2). Remote track I/O is serviced on the
+  `net`/CLI side, not inline on `fdc` — see §10.1 for dispatch and timeout bounding.
+- **Availability.** Enabled only when WiFi is up (§9.1); on WiFi drop, remote drives go
+  **not-ready** until reconnect, and an in-flight `copy` fails cleanly.
+
 ---
 
 ## 10. Storage (SD Card)
@@ -527,6 +582,52 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
   (e.g. resolve args against a base dir constant), so adding `cd`/subdirectory browsing
   later is additive, not a rewrite. Defer full directory navigation to the same
   post-v1 phase as the web GUI.
+
+### 10.1 Remote images over TNFS **[RESOLVED: in scope for v1]**
+
+A drive can be mounted from a **TNFS server** as well as from SD —
+`mount 0 tnfs://host[:port]/path/CPM22-8MB-56K.DSK` — and a `Drive<n>` config value may
+hold such a URL (§7). The FDC+ path is unchanged: the FDC still asks for whole tracks;
+only the *backing* differs.
+
+- **Backing abstraction [CLAUDE — resolved].** The `disk` module opens each mount through
+  a small backing interface — `size()`, `read_at(off,len,buf)`, `write_at(off,len,buf)`,
+  `close()`. **Local** backing = `pread`/`pwrite` on the open FATFS handle (§10);
+  **remote** backing = TNFS `LSEEK`+`READ`/`WRITE` via `net/tnfs` (§9.5).
+  `disk_read_track`/`disk_write_track` and the FDC engine call the backing and don't know
+  which it is. Design the M3 disk API this way from the start so TNFS is additive (same
+  spirit as the "don't hardcode root" rule above).
+- **Latency vs the ~1 s FDC timeout — the key risk [DECIDE].** An 8192-byte track is many
+  TNFS datagrams (per-read payload is capped), each a WiFi round trip; a blocking remote
+  read can approach or exceed the FDC command timeout, and it must **not** run on the
+  core-1 `fdc` task (§9.5 / §5.2). Mitigations to build and measure: keep the 1-entry
+  track cache warm with **read-ahead**; service remote I/O on core 0 while the FDC path
+  waits under its longer *data* timeout (~7 s, §6.4) rather than the 1 s command timeout;
+  treat TNFS as **best-effort** — the owner may need a lower baud for remote drives.
+  Validate timing on real hardware before declaring TNFS done (plan gate).
+- **Read-only option.** Default **read-write** to match SD; allow a mount to be flagged
+  read-only (WRIT → `Not Ready`) for servers the owner does not want written.
+- **Lifecycle / ordering.** Remote mounts need the network, so a `tnfs://` `Drive<n>` is
+  **not** mounted at boot step 5 with the SD drives; it is deferred until WiFi connects
+  (step 9), mounted then, re-mounted on reconnect, and dropped to not-ready on
+  disconnect. See §12.
+
+### 10.2 File copy between TNFS and SD **[RESOLVED: in scope for v1]**
+
+`copy` transfers whole files (not tracks) between the SD card and a TNFS server, in
+either direction, so images can be staged without a separate FTP client:
+
+- `copy tnfs://host/path/CPM3.DSK CPM3.DSK` — **pull** a remote file to SD root.
+- `copy CPM3.DSK tnfs://host/backup/CPM3.DSK` — **push** an SD file to the server.
+- SD-to-SD (`copy a.dsk b.dsk`) is the existing local case; TNFS-to-TNFS is allowed too.
+
+Rules: the endpoint with a `tnfs://` prefix is remote, otherwise it is an SD-root name;
+copy streams in bounded chunks and, when the SD side is involved, releases the **SD
+mutex between chunks** so it never breaches the FDC ~1 s timeout (§5.2) — the same
+chunking discipline as local `copy` and FTP. Copy uses a **transient** TNFS session
+(open → stream → close), independent of any mounted-drive session. On any network error
+mid-copy, report failure and leave no partial file mounted (a partial SD file may remain,
+as with a failed local copy — noted, not cleaned in v1).
 
 ---
 
@@ -574,11 +675,12 @@ verify + set-boot-partition + reboot backend, so the network path is mostly the
 2. Init status + drive LED GPIOs (blink drives in sequence as a lamp test).
 3. Init SD; print card type/size.
 4. Load config from NVS (defaults if absent).
-5. Mount configured drives.
+5. Mount configured drives (SD-backed only; `tnfs://` drives are deferred to step 9).
 6. Start FDC timeout timer.
 7. Init FDC UART at configured baud.
 8. Init CLI; run `/autoexec.bat` if present; show prompt.
-9. If WiFi enabled, connect → (on connect) start Telnet + FTP.
+9. If WiFi enabled, connect → (on connect) start Telnet + FTP and mount any deferred
+   `tnfs://` drives (§10.1); re-mount them on reconnect, drop to not-ready on disconnect.
 
 ---
 
@@ -634,3 +736,7 @@ All resolved:
 - ~~CLI command set~~ — **RESOLVED: §8.1 locked for v1** (§8.1).
 - ~~AP provisioning / web UI~~ — **RESOLVED: both deferred (out of v1 scope)** (§1).
 - ~~GitHub OTA~~ — **RESOLVED: in scope for v1** (§11.1).
+- ~~Directory wildcards~~ — **RESOLVED: `dir`/`ls <spec>` glob in scope** (§8.4).
+- ~~Remote disk images (TNFS)~~ — **RESOLVED: mount from & `copy` to/from `tnfs://` in
+  scope for v1** (§9.5 / §10.1 / §10.2). Remaining open risk is remote-read latency vs
+  the FDC ~1 s timeout (§10.1), to validate on hardware.
