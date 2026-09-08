@@ -25,6 +25,7 @@
 
 #include "net.h"
 #include "config.h"
+#include "ftp.h"
 
 static const char *TAG = "net";
 
@@ -222,19 +223,24 @@ esp_err_t net_init(void)
         return err;
     }
 
-    /* mDNS: advertise <wifiName>.local + the telnet service (DESIGN.md §9.1). The
-     * FTP record is added in M6. Harmless on a LAN without mDNS. */
+    /* mDNS: advertise <wifiName>.local + the telnet and FTP services (DESIGN.md
+     * §9.1). Harmless on a LAN without mDNS. */
     if (mdns_init() == ESP_OK) {
         s_mdns_inited = true;
         mdns_hostname_set(config_get()->wifi_name);
         mdns_instance_name_set("FDC+ Serial Disk Server");
         mdns_service_add(NULL, "_telnet", "_tcp", NET_CONSOLE_PORT, NULL, 0);
+        mdns_service_add(NULL, "_ftp", "_tcp", 21, NULL, 0); /* FTP server (§9.4) */
     } else {
         ESP_LOGW(TAG, "mDNS init failed (name discovery unavailable)");
     }
 
-    /* Serve the TCP console whenever the link is up (task blocks until connected). */
+    /* Serve the TCP console + FTP whenever the link is up (tasks block until
+     * connected). Both live on core 0, off the FDC path (DESIGN.md §5.2). */
     net_console_start();
+    if (net_ftp_start() != ESP_OK) {
+        ESP_LOGW(TAG, "FTP task not started (out of memory)");
+    }
 
     /* Start connecting now if enabled and configured (DESIGN.md §12 step 9). */
     const config_t *cfg = config_get();

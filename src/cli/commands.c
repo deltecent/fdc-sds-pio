@@ -6,8 +6,9 @@
  * and baud (store-only until the FDC UART lands at M4). M3 adds the disk-module
  * commands mount/unmount and dump, plus the `dir <spec>` glob (§8.4). The remaining
  * commands stay stubbed and are filled in by later milestones. M4 wires the FDC+
- * engine into the CLI: stats/clear, loopback, and live baud application. The remaining
- * stubs are M5 net/time, M6 FTP creds, M7 update.
+ * engine into the CLI: stats/clear, loopback, and live baud application. M5 added the
+ * net/time commands (wifi/ssid/pass/time/tz/logout) and M6 the FTP credentials
+ * (ftpuser/ftppass). The remaining stubs are exec (M8) and update (M7).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +57,8 @@ static int cmd_pass(cli_console_t *c, int argc, char **argv);
 static int cmd_time(cli_console_t *c, int argc, char **argv);
 static int cmd_tz(cli_console_t *c, int argc, char **argv);
 static int cmd_logout(cli_console_t *c, int argc, char **argv);
+static int cmd_ftpuser(cli_console_t *c, int argc, char **argv);
+static int cmd_ftppass(cli_console_t *c, int argc, char **argv);
 static int cmd_stub(cli_console_t *c, int argc, char **argv);
 
 /* Order here is the order `help` prints. */
@@ -75,8 +78,8 @@ static const cli_command_t k_commands[] = {
     { "ssid",     NULL,     "Set WiFi SSID",                  cmd_ssid     },
     { "pass",     NULL,     "Set WiFi password",              cmd_pass     },
     { "hostname", NULL,     "Set device/host name",           cmd_hostname },
-    { "ftpuser",  NULL,     "Set FTP username",               cmd_stub     },
-    { "ftppass",  NULL,     "Set FTP password",               cmd_stub     },
+    { "ftpuser",  NULL,     "Set FTP username",               cmd_ftpuser  },
+    { "ftppass",  NULL,     "Set FTP password",               cmd_ftppass  },
     { "update",   NULL,     "OTA update (SD / github / url)", cmd_stub     },
     { "type",     "cat",    "Print a text file",              cmd_type     },
     { "exec",     "run",    "Run a batch file of commands",   cmd_stub     },
@@ -696,6 +699,41 @@ static int cmd_pass(cli_console_t *c, int argc, char **argv)
     }
     config_set_str(CFG_STR_WIFI_PASS, argv[1]);
     cli_write(c, "WiFi password set\r\n");
+    return 0;
+}
+
+/* ---- M6: FTP credentials (DESIGN.md §8.1 / §9.4) --------------------------- */
+
+static int cmd_ftpuser(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        const char *user = config_get()->ftp_user;
+        cli_printf(c, "%s\r\n", user[0] ? user : "(unset)");
+        return 0;
+    }
+    if (strlen(argv[1]) >= CONFIG_FTP_CAP) {
+        cli_printf(c, "FTP username too long (max %d)\r\n", CONFIG_FTP_CAP - 1);
+        return 1;
+    }
+    config_set_str(CFG_STR_FTP_USER, argv[1]);
+    cli_printf(c, "FTP username set to %s (save; applies on next connect)\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_ftppass(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        /* Never echo the stored password back. */
+        cli_printf(c, "FTP password is %s\r\n",
+                   config_get()->ftp_pass[0] ? "set" : "unset");
+        return 0;
+    }
+    if (strlen(argv[1]) >= CONFIG_FTP_CAP) {
+        cli_printf(c, "FTP password too long (max %d)\r\n", CONFIG_FTP_CAP - 1);
+        return 1;
+    }
+    config_set_str(CFG_STR_FTP_PASS, argv[1]);
+    cli_write(c, "FTP password set (save; applies on next connect)\r\n");
     return 0;
 }
 
