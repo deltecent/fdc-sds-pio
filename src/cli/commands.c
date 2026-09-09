@@ -970,7 +970,10 @@ static int cmd_wifi(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "WiFi:  %s\r\n", s.enabled ? "enabled" : "disabled");
     cli_printf(c, "SSID:  %s\r\n", s.ssid[0] ? s.ssid : "(unset)");
     if (s.connected) {
-        cli_printf(c, "State: connected  IP %s  RSSI %d dBm\r\n", s.ip, s.rssi);
+        cli_printf(c, "State: connected  IP %s\r\n", s.ip);
+        cli_printf(c, "AP:    %02x:%02x:%02x:%02x:%02x:%02x  RSSI %d dBm\r\n",
+                   s.bssid[0], s.bssid[1], s.bssid[2],
+                   s.bssid[3], s.bssid[4], s.bssid[5], s.rssi);
     } else {
         cli_printf(c, "State: %s\r\n", s.enabled ? "connecting/disconnected" : "idle");
     }

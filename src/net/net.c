@@ -172,6 +172,7 @@ void net_get_status(net_status_t *out)
         wifi_ap_record_t ap;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             out->rssi = ap.rssi;
+            memcpy(out->bssid, ap.bssid, sizeof out->bssid); /* which AP we picked */
         }
     }
 }

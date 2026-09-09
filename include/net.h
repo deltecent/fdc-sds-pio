@@ -32,6 +32,7 @@ typedef struct {
     char   ssid[33];  /* configured SSID (WiFi max 32), or "" */
     char   ip[16];    /* dotted IPv4, or "" when not connected */
     int8_t rssi;      /* last-seen RSSI in dBm, 0 if unknown */
+    uint8_t bssid[6]; /* MAC of the associated AP, all-zero if unknown */
 } net_status_t;
 
 /*
