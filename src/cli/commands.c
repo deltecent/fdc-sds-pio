@@ -74,7 +74,7 @@ static const cli_command_t k_commands[] = {
     { "help",     "?",      "Show command help",              cmd_help     },
     { "version",  NULL,     "Show firmware version",          cmd_version  },
     { "baud",     NULL,     "Set FDC+ baud rate",             cmd_baud     },
-    { "dir",      "ls",     "List SD files [glob spec]",      cmd_dir      },
+    { "dir",      "ls",     "List files [spec | tnfs://url]", cmd_dir      },
     { "mount",    NULL,     "Show mount table / mount image", cmd_mount    },
     { "unmount",  "umount", "Unmount a drive",                cmd_unmount  },
     { "stats",    NULL,     "Show FDC+ statistics",           cmd_stats    },
@@ -187,8 +187,78 @@ static int cmd_reboot(cli_console_t *c, int argc, char **argv)
     return 0; /* not reached */
 }
 
+/* Context for the tnfs_list_dir callback (remote `dir`). */
+struct dir_remote_ctx {
+    cli_console_t *c;
+    const char   *spec;      /* optional glob filter, or NULL */
+    bool          spec_is_dot;
+    unsigned      files;
+};
+
+/* One remote directory entry: apply the same dotfile-hide + glob rules as SD dir, and
+ * mark subdirectories with a trailing '/' (ls -F style). */
+static void dir_remote_entry(const char *name, bool is_dir, void *vctx)
+{
+    struct dir_remote_ctx *ctx = vctx;
+    /* Hide dotfiles incl. "." / ".." (§8.1) unless the spec starts with '.' (§8.4). */
+    if (name[0] == '.' && !ctx->spec_is_dot) {
+        return;
+    }
+    if (ctx->spec && !wildcard_match_ci(ctx->spec, name)) {
+        return;
+    }
+    cli_printf(ctx->c, "  %s%s\r\n", name, is_dir ? "/" : "");
+    ++ctx->files;
+}
+
+/* `dir tnfs://host[:port]/path/ [spec]` — list a TNFS server directory (§8.4/§10.1). */
+static int cmd_dir_remote(cli_console_t *c, const char *url, const char *spec)
+{
+    if (!net_is_connected()) {
+        cli_write(c, "dir: WiFi not connected\r\n");
+        return 1;
+    }
+
+    /* Allow a wildcard glued to the URL path, e.g. `dir tnfs://host/pub/<glob>` (one
+     * token, just like local `dir *.DSK`): split the trailing segment off as the glob
+     * pattern and list its parent directory. An explicit spec arg takes precedence. */
+    char urlbuf[16 + CONFIG_FILE_CAP];
+    if (!spec) {
+        const char *last = strrchr(url, '/');
+        if (last && strpbrk(last + 1, "*?")) {
+            spec = last + 1;                      /* the wildcard leaf */
+            size_t dirlen = (size_t)(last - url); /* parent, without the trailing '/' */
+            if (dirlen > 0 && dirlen < sizeof urlbuf) {
+                memcpy(urlbuf, url, dirlen);
+                urlbuf[dirlen] = '\0';
+                url = urlbuf;                     /* a bare host re-gains '/' in tnfs_list_dir */
+            }
+        }
+    }
+
+    struct dir_remote_ctx ctx = {
+        .c = c, .spec = spec, .spec_is_dot = spec && spec[0] == '.', .files = 0,
+    };
+    esp_err_t err = tnfs_list_dir(url, dir_remote_entry, &ctx);
+    if (err != ESP_OK) {
+        cli_printf(c, "%s: %s\r\n", url,
+                   err == ESP_ERR_NOT_FOUND   ? "not found" :
+                   err == ESP_ERR_TIMEOUT     ? "server unreachable" :
+                   err == ESP_ERR_INVALID_ARG ? "bad URL" : "listing failed");
+        return 1;
+    }
+    cli_printf(c, "%u item(s)\r\n", ctx.files); /* may include directories */
+    return 0;
+}
+
 static int cmd_dir(cli_console_t *c, int argc, char **argv)
 {
+    /* A tnfs:// argument lists a remote server directory (§10.1); an optional second
+     * arg is the same glob spec as the local case. */
+    if (argc > 1 && tnfs_is_url(argv[1])) {
+        return cmd_dir_remote(c, argv[1], (argc > 2) ? argv[2] : NULL);
+    }
+
     /* Optional glob filter, e.g. `dir *.BAT` (DESIGN.md §8.4). */
     const char *spec = (argc > 1) ? argv[1] : NULL;
     const bool spec_is_dot = spec && spec[0] == '.';

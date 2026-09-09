@@ -431,8 +431,9 @@ needed.
   `dir`/`ls` (§8.4), a
   `tnfs://` URL as a `mount` target, and `tnfs://` endpoints on `copy` (§10.1).
 - Wildcards apply only to `dir`/`ls`; other file commands take one explicit name in v1
-  (no glob-delete/-copy). `type`/`delete`/`rename` operate on SD only; `copy` is the one
-  file command that also accepts `tnfs://` (§10.1).
+  (no glob-delete/-copy). `type`/`delete`/`rename` operate on SD only; `copy` accepts
+  `tnfs://` endpoints (§10.1), and `dir`/`ls` accepts a `tnfs://` **directory** URL to
+  list a remote server (§8.4). No other command takes a `tnfs://` arg in v1.
 
 ### 8.2 Batch files & AUTOEXEC
 - `exec <name>` reads `<name>` (or `<name>.bat`) from SD and feeds each line to the
@@ -476,6 +477,26 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
 - The dotfile-hiding rule still applies unless the `spec` itself begins with `.`.
 - A `spec` that matches nothing prints the normal footer with `0 file(s)`.
 - Wildcards are a **listing** convenience only — see §8.1: no glob-delete/-copy in v1.
+- **[CLAUDE — resolved during M9c: `dir tnfs://`.]** `dir`/`ls` also accepts a `tnfs://`
+  **directory** URL — `dir tnfs://host[:port]/path/` (a bare `tnfs://host` lists the
+  server root) — and prints that remote directory. This surfaced on real hardware:
+  after booting CP/M from a served disk there was no way to see what a TNFS server
+  offers before mounting. The listing runs over a **transient** session (same lifecycle
+  as a `copy`, §10.2) on the CLI task (core 0), never the FDC path (§5.2).
+  - **Extended read with a fallback.** It uses `OPENDIRX`/`READDIRX` (one entry per
+    `READDIRX`, so a reply always fits the datagram buffer), which carry a per-entry
+    directory flag (`TNFS_DIRENTRY_DIR`); **subdirectories are shown with a trailing
+    `/`** (`ls -F` style, e.g. `fujinet-rs232/`). On a server that doesn't support the
+    extended opcodes it falls back to basic `OPENDIR`/`READDIR`, which returns names
+    only (no type marker). `CLOSEDIR` + `UMOUNT` close the session either way.
+  - **Names only** (no size column): `READDIRX` does carry the size, but a size column
+    isn't shown — it's a browse-before-mount aid, and the width isn't worth it. (Could
+    be added later at no protocol cost.)
+  - **Glob.** An optional filename glob applies, filtered **client-side** with the same
+    case-insensitive matcher and dotfile-hiding rule as the local `dir` (so `.`/`..` are
+    hidden). It may be a separate arg (`dir tnfs://host/pub/ *.DSK`) **or** glued to the
+    URL path like the local form (`dir tnfs://host/pub/` + a `*`/`?` leaf) — a wildcard
+    in the URL's last segment is split off as the pattern and its parent is listed.
 
 ---
 

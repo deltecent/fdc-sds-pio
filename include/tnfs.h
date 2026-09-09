@@ -69,6 +69,25 @@ esp_err_t tnfs_write_at(tnfs_file_t *f, uint32_t off, const void *buf, size_t le
 /* CLOSE the file, UMOUNT the session, close the socket and free `f`. NULL-safe. */
 void tnfs_close(tnfs_file_t *f);
 
+/*
+ * Callback invoked once per directory entry during tnfs_list_dir. `is_dir` is true
+ * when the entry is a subdirectory (known only over the extended READDIRX path; always
+ * false on the basic-READDIR fallback).
+ */
+typedef void (*tnfs_dir_cb)(const char *name, bool is_dir, void *ctx);
+
+/*
+ * List the directory named by a tnfs://host[:port]/path/ URL over a transient session
+ * (§10.2): MOUNT "/", then OPENDIRX/READDIRX (extended: carries a per-entry directory
+ * flag) with a fallback to basic OPENDIR/READDIR (names only) on servers that don't
+ * support the extended opcodes, then CLOSEDIR + UMOUNT. A bare tnfs://host with no path
+ * lists the server root. `cb` is called for every raw entry (including "." / ".."); the
+ * caller applies any filtering. Returns ESP_OK, ESP_ERR_INVALID_ARG (bad URL),
+ * ESP_ERR_NOT_FOUND (no such directory), ESP_ERR_TIMEOUT (server unreachable), or
+ * ESP_FAIL.
+ */
+esp_err_t tnfs_list_dir(const char *url, tnfs_dir_cb cb, void *ctx);
+
 #ifdef __cplusplus
 }
 #endif

@@ -48,6 +48,11 @@ static const char *TAG = "tnfs";
 /* Commands. */
 #define TNFS_MOUNT   0x00
 #define TNFS_UMOUNT  0x01
+#define TNFS_OPENDIR  0x10
+#define TNFS_READDIR  0x11
+#define TNFS_CLOSEDIR 0x12
+#define TNFS_OPENDIRX 0x17
+#define TNFS_READDIRX 0x18
 #define TNFS_READ    0x21
 #define TNFS_WRITE   0x22
 #define TNFS_CLOSE   0x23
@@ -70,6 +75,11 @@ static const char *TAG = "tnfs";
 /* LSEEK whence. */
 #define TNFS_SEEK_SET 0x00
 #define TNFS_SEEK_END 0x02
+
+/* READDIRX per-entry (dirent) flags and reply dir-status flags. */
+#define TNFS_DIRENTRY_DIR  0x01  /* entry is a directory */
+#define TNFS_DIRSTATUS_EOF 0x01  /* last batch: end of directory reached */
+#define TNFS_READDIRX_FIXED 13   /* dirent bytes before the name: flags(1)+size(4)+mtime(4)+ctime(4) */
 
 /* Protocol version we advertise in MOUNT: 1.2, bytes {minor, major} = {0x02, 0x01}. */
 #define TNFS_VER_LO 0x02
@@ -140,11 +150,13 @@ static esp_err_t tcp_response(tnfs_file_t *f, uint8_t cmd)
     } else if (ok) {
         size_t extra = 0;
         switch (cmd) {
-        case TNFS_MOUNT: extra = 4; break; /* version(2) + retry(2) */
-        case TNFS_OPEN:  extra = 1; break; /* fd */
-        case TNFS_LSEEK: extra = 4; break; /* position */
-        case TNFS_WRITE: extra = 2; break; /* count */
-        case TNFS_READ:  extra = 2; break; /* count, then that many data bytes */
+        case TNFS_MOUNT:    extra = 4; break; /* version(2) + retry(2) */
+        case TNFS_OPEN:     extra = 1; break; /* fd */
+        case TNFS_OPENDIR:  extra = 1; break; /* dir handle */
+        case TNFS_OPENDIRX: extra = 3; break; /* dir handle(1) + entry count(2) */
+        case TNFS_LSEEK:    extra = 4; break; /* position */
+        case TNFS_WRITE:    extra = 2; break; /* count */
+        case TNFS_READ:     extra = 2; break; /* count, then that many data bytes */
         default: break;
         }
         if (extra) {
@@ -162,6 +174,52 @@ static esp_err_t tcp_response(tnfs_file_t *f, uint8_t cmd)
                 return ESP_ERR_TIMEOUT;
             }
             total += cnt;
+        }
+        /* READDIR reply is a NUL-terminated name with no length prefix; read to the
+         * NUL one byte at a time (names are short). EOF status carries no name and is
+         * handled above by `ok` being false. */
+        if (cmd == TNFS_READDIR) {
+            for (;;) {
+                if (total >= sizeof f->resp) {
+                    return ESP_FAIL;
+                }
+                if (!tcp_read_exact(f->sock, f->resp + total, 1)) {
+                    return ESP_ERR_TIMEOUT;
+                }
+                if (f->resp[total++] == '\0') {
+                    break;
+                }
+            }
+        }
+        /* READDIRX reply: count(1) + dirstatus(1) + dirpos(2), then `count` dirents,
+         * each TNFS_READDIRX_FIXED bytes + a NUL-terminated name. No length prefix, so
+         * frame it from the count. */
+        if (cmd == TNFS_READDIRX) {
+            if (!tcp_read_exact(f->sock, f->resp + total, 4)) {
+                return ESP_ERR_TIMEOUT;
+            }
+            uint8_t count = f->resp[total];
+            total += 4;
+            for (uint8_t i = 0; i < count; ++i) {
+                if (total + TNFS_READDIRX_FIXED > sizeof f->resp) {
+                    return ESP_FAIL;
+                }
+                if (!tcp_read_exact(f->sock, f->resp + total, TNFS_READDIRX_FIXED)) {
+                    return ESP_ERR_TIMEOUT;
+                }
+                total += TNFS_READDIRX_FIXED;
+                for (;;) {
+                    if (total >= sizeof f->resp) {
+                        return ESP_FAIL;
+                    }
+                    if (!tcp_read_exact(f->sock, f->resp + total, 1)) {
+                        return ESP_ERR_TIMEOUT;
+                    }
+                    if (f->resp[total++] == '\0') {
+                        break;
+                    }
+                }
+            }
         }
     }
     f->resp_len = total;
@@ -575,4 +633,192 @@ void tnfs_close(tnfs_file_t *f)
     tnfs_command(f, TNFS_UMOUNT, 0);
     close(f->sock);
     free(f);
+}
+
+/*
+ * Extended listing: OPENDIRX gives a per-entry directory flag (and size/times we don't
+ * use). Read one entry per READDIRX (numwanted = 1) so a reply always fits resp[] and
+ * TCP framing stays trivial. Fills *dh with the handle to CLOSEDIR. Returns
+ * ESP_ERR_NOT_SUPPORTED if the server rejects OPENDIRX so the caller can fall back.
+ */
+static esp_err_t tnfs_listx(tnfs_file_t *f, const char *path, uint8_t *dh,
+                            tnfs_dir_cb cb, void *ctx)
+{
+    /* OPENDIRX: diropt(1) + dirsort(1) + maxresults(2) + pattern(NUL) + path(NUL). */
+    uint8_t *pl = &f->req[TNFS_HDR_LEN];
+    size_t path_len = strlen(path) + 1;
+    size_t plen = 5 + path_len; /* opts(2) + max(2) + empty pattern(1) + path */
+    if (plen > sizeof f->req - TNFS_HDR_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    pl[0] = 0;              /* default directory options */
+    pl[1] = 0;              /* default sort */
+    wr16(&pl[2], 0);        /* unlimited results */
+    pl[4] = '\0';           /* empty wildcard pattern (client filters) */
+    memcpy(&pl[5], path, path_len);
+
+    esp_err_t err = tnfs_command(f, TNFS_OPENDIRX, plen);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (f->resp[TNFS_STATUS_OFF] != TNFS_OK || f->resp_len < TNFS_STATUS_OFF + 2) {
+        /* A not-found directory is real; anything else we treat as "no OPENDIRX" and
+         * let the caller retry with basic OPENDIR. */
+        return (f->resp[TNFS_STATUS_OFF] == TNFS_ENOENT) ? ESP_ERR_NOT_FOUND
+                                                         : ESP_ERR_NOT_SUPPORTED;
+    }
+    *dh = f->resp[TNFS_STATUS_OFF + 1];
+
+    for (;;) {
+        pl = &f->req[TNFS_HDR_LEN];
+        pl[0] = *dh;
+        pl[1] = 1;          /* one entry per reply */
+        err = tnfs_command(f, TNFS_READDIRX, 2);
+        if (err != ESP_OK) {
+            return err;
+        }
+        uint8_t status = f->resp[TNFS_STATUS_OFF];
+        if (status == TNFS_EOF) {
+            return ESP_OK;
+        }
+        if (status != TNFS_OK || f->resp_len < TNFS_STATUS_OFF + 1 + 4) {
+            return ESP_FAIL;
+        }
+        /* Body: count(1) + dirstatus(1) + dirpos(2), then `count` dirents. */
+        const uint8_t *p = &f->resp[TNFS_STATUS_OFF + 1];
+        const uint8_t *end = &f->resp[f->resp_len];
+        uint8_t count = p[0];
+        uint8_t dstatus = p[1];
+        p += 4;
+        for (uint8_t i = 0; i < count; ++i) {
+            if (p + TNFS_READDIRX_FIXED >= end) {
+                return ESP_FAIL;
+            }
+            bool is_dir = (p[0] & TNFS_DIRENTRY_DIR) != 0;
+            const uint8_t *name = p + TNFS_READDIRX_FIXED;
+            const uint8_t *nul = memchr(name, '\0', (size_t)(end - name));
+            if (!nul) {
+                return ESP_FAIL;
+            }
+            if (name[0]) {
+                cb((const char *)name, is_dir, ctx);
+            }
+            p = nul + 1;
+        }
+        if (dstatus & TNFS_DIRSTATUS_EOF) {
+            return ESP_OK; /* server flagged the last batch — no extra round trip */
+        }
+    }
+}
+
+/*
+ * Basic listing fallback: OPENDIR + READDIR return names only (no type), so every entry
+ * is reported with is_dir = false. Fills *dh with the handle to CLOSEDIR.
+ */
+static esp_err_t tnfs_list_basic(tnfs_file_t *f, const char *path, uint8_t *dh,
+                                 tnfs_dir_cb cb, void *ctx)
+{
+    size_t path_len = strlen(path) + 1;
+    if (path_len > sizeof f->req - TNFS_HDR_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(&f->req[TNFS_HDR_LEN], path, path_len);
+    esp_err_t err = tnfs_command(f, TNFS_OPENDIR, path_len);
+    if (err == ESP_OK) {
+        err = status_err(f->resp[TNFS_STATUS_OFF]);
+    }
+    if (err != ESP_OK || f->resp_len < TNFS_STATUS_OFF + 2) {
+        return (err == ESP_OK) ? ESP_FAIL : err;
+    }
+    *dh = f->resp[TNFS_STATUS_OFF + 1];
+
+    for (;;) {
+        f->req[TNFS_HDR_LEN] = *dh;
+        err = tnfs_command(f, TNFS_READDIR, 1);
+        if (err != ESP_OK) {
+            return err;
+        }
+        uint8_t status = f->resp[TNFS_STATUS_OFF];
+        if (status == TNFS_EOF) {
+            return ESP_OK;
+        }
+        if (status != TNFS_OK) {
+            return ESP_FAIL;
+        }
+        char *name = (char *)&f->resp[TNFS_STATUS_OFF + 1];
+        size_t avail = (f->resp_len > TNFS_STATUS_OFF + 1)
+                           ? f->resp_len - (TNFS_STATUS_OFF + 1) : 0;
+        if (avail == 0) {
+            continue; /* malformed empty reply */
+        }
+        if (!memchr(name, '\0', avail)) {
+            if (TNFS_STATUS_OFF + 1 + avail < sizeof f->resp) {
+                name[avail] = '\0';
+            } else {
+                name[avail - 1] = '\0';
+            }
+        }
+        if (name[0]) {
+            cb(name, false, ctx);
+        }
+    }
+}
+
+esp_err_t tnfs_list_dir(const char *url, tnfs_dir_cb cb, void *ctx)
+{
+    if (!tnfs_is_url(url) || !cb) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* A bare `tnfs://host` (no path) means the server root; tnfs_url_parse needs a
+     * path, so synthesize a trailing '/'. */
+    char urlbuf[240];
+    if (!strchr(url + 7, '/')) {
+        int n = snprintf(urlbuf, sizeof urlbuf, "%s/", url);
+        if (n < 0 || n >= (int)sizeof urlbuf) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        url = urlbuf;
+    }
+
+    char host[64];
+    char path[160];
+    uint16_t port = TNFS_DEFAULT_PORT;
+    esp_err_t err = tnfs_url_parse(url, host, sizeof host, &port, path, sizeof path);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    tnfs_file_t *f = calloc(1, sizeof *f);
+    if (!f) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Transient session, same UDP-then-TCP probe as tnfs_open (§10.2). */
+    if (tnfs_try(f, host, port, false) != ESP_OK &&
+        tnfs_try(f, host, port, true) != ESP_OK) {
+        ESP_LOGW(TAG, "cannot mount %s:%u (UDP or TCP)", host, port);
+        free(f);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    /* Prefer the extended listing (per-entry directory flag); on a server without
+     * OPENDIRX, retry with the basic names-only listing. */
+    uint8_t dh = 0;
+    err = tnfs_listx(f, path, &dh, cb, ctx);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGD(TAG, "OPENDIRX unsupported; using basic READDIR");
+        err = tnfs_list_basic(f, path, &dh, cb, ctx);
+    }
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "list '%s' failed", path);
+    }
+
+    /* CLOSEDIR (best effort) then tear down the session. */
+    f->req[TNFS_HDR_LEN] = dh;
+    tnfs_command(f, TNFS_CLOSEDIR, 1);
+    tnfs_command(f, TNFS_UMOUNT, 0);
+    close(f->sock);
+    free(f);
+    return err;
 }
