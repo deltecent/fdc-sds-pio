@@ -357,18 +357,22 @@ static void worker_mount(rjob_t *j)
         return;
     }
 
-    /* Default read-write (§10.1); fall back to read-only if the server won't grant it. */
+    /* Default read-write (§10.1); fall back to read-only if the server won't grant it.
+     * Keep both errors: on fallback, report why write was denied; if the read-only open
+     * also fails, report ITS reason (not the read-write probe's) and fail on it. */
     tnfs_file_t *tf = NULL;
     bool readonly = false;
-    esp_err_t err = tnfs_open(url, true, false, &tf);
-    if (err != ESP_OK) {
-        if (tnfs_open(url, false, false, &tf) == ESP_OK) {
+    esp_err_t err_rw = tnfs_open(url, true, false, &tf);
+    if (err_rw != ESP_OK) {
+        esp_err_t err_ro = tnfs_open(url, false, false, &tf);
+        if (err_ro == ESP_OK) {
             readonly = true;
-            ESP_LOGW(TAG, "drive %d '%s' opened read-only", j->drive, url);
+            ESP_LOGW(TAG, "drive %d '%s' opened read-only (write denied: %s)",
+                     j->drive, url, esp_err_to_name(err_rw));
         } else {
-            ESP_LOGW(TAG, "drive %d remote mount '%s' failed: %s", j->drive, url,
-                     esp_err_to_name(err));
-            rjob_complete(j, err);
+            ESP_LOGW(TAG, "drive %d remote mount '%s' failed: rw=%s ro=%s", j->drive, url,
+                     esp_err_to_name(err_rw), esp_err_to_name(err_ro));
+            rjob_complete(j, err_ro);
             return;
         }
     }

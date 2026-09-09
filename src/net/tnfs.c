@@ -489,7 +489,16 @@ esp_err_t tnfs_open(const char *url, bool writable, bool create, tnfs_file_t **o
         if (err == ESP_OK) {
             err = ESP_FAIL;
         }
-        ESP_LOGW(TAG, "OPEN '%s' failed", path);
+        /* Say which mode was requested and why it failed — a read-write OPEN that a
+         * read-only server rejects is the expected fallback path (see disk.c mount),
+         * so the mode + reason are what distinguish it from a genuine failure. */
+        const char *mode = create ? "write/create" : (writable ? "read-write" : "read-only");
+        if (f->resp_len > TNFS_STATUS_OFF) {
+            ESP_LOGW(TAG, "OPEN '%s' (%s) failed: %s (tnfs 0x%02x)", path, mode,
+                     esp_err_to_name(err), f->resp[TNFS_STATUS_OFF]);
+        } else {
+            ESP_LOGW(TAG, "OPEN '%s' (%s) failed: %s", path, mode, esp_err_to_name(err));
+        }
         goto fail_open;
     }
     f->fd = f->resp[TNFS_STATUS_OFF + 1];
