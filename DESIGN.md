@@ -398,6 +398,7 @@ byte ever leaks into a command line.
 | `unmount` / `umount` | drive | Unmount a drive |
 | `stats` | — | Baud + STAT/READ/WRIT/ERR/TOUT counters + last-op strings |
 | `clear` | — | Zero statistics |
+| `diag` | — | One-shot support report: firmware/hardware, NVS config, WiFi, SD + `autoexec.bat`, drives, FDC+ stats (read-only; no secrets) |
 | `log` | level | Show/set console log level: `none`/`error`/`warn`/`info`/`debug`/`verbose` (also `off`=none, `on`=info); default `warn` (§13) |
 | `save` / `write` | — | Persist config to NVS |
 | `wipe` | — | Erase NVS, reload defaults |

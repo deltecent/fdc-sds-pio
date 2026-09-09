@@ -27,6 +27,10 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_chip_info.h"
+#include "esp_idf_version.h"
+#include "esp_mac.h"
+#include "esp_timer.h"
 
 #include "cli.h"
 #include "config.h"
@@ -55,6 +59,7 @@ static int cmd_wipe(cli_console_t *c, int argc, char **argv);
 static int cmd_hostname(cli_console_t *c, int argc, char **argv);
 static int cmd_baud(cli_console_t *c, int argc, char **argv);
 static int cmd_stats(cli_console_t *c, int argc, char **argv);
+static int cmd_diag(cli_console_t *c, int argc, char **argv);
 static int cmd_clear(cli_console_t *c, int argc, char **argv);
 static int cmd_log(cli_console_t *c, int argc, char **argv);
 static int cmd_loopback(cli_console_t *c, int argc, char **argv);
@@ -125,6 +130,12 @@ static const char D_stats[] =
     "  unknown              unrecognized commands\r\n"
     "  last                 the most recent command handled\r\n"
     "usage: stats\r\n";
+static const char D_diag[] =
+    "Prints one self-contained report - firmware/hardware, saved (NVS) settings,\r\n"
+    "WiFi, SD card, drives, and FDC+ link stats - meant to be copied out of the\r\n"
+    "console and pasted into a support email. Passwords are never shown, only\r\n"
+    "whether one is set. Read-only: it changes nothing.\r\n"
+    "usage: diag\r\n";
 static const char D_dump[] =
     "16 bytes per line, like xxd, for troubleshooting. With no arguments, shows\r\n"
     "the last track the FDC+ transferred.\r\n"
@@ -189,6 +200,7 @@ static const cli_command_t k_commands[] = {
     { "mount",    NULL,     "Mount a disk image on a drive",       cmd_mount,  D_mount    },
     { "unmount",  "umount", "Unmount a drive",                     cmd_unmount, D_unmount },
     { "stats",    NULL,     "Show FDC+ statistics",                cmd_stats,  D_stats    },
+    { "diag",     NULL,     "Print a full status report for support", cmd_diag, D_diag    },
     { "clear",    NULL,     "Reset FDC+ statistics to zero",       cmd_clear,  NULL       },
     { "log",      NULL,     "Show or set console logging detail",  cmd_log,    D_log      },
     { "save",     "write",  "Save settings so they survive reboot", cmd_save,  D_save     },
@@ -1278,6 +1290,147 @@ static int cmd_exec(cli_console_t *c, int argc, char **argv)
         return 1;
     }
     return cli_exec_batch(c, argv[1]) == 0 ? 0 : 1;
+}
+
+/* ---- diag: one-shot support summary (copy/paste into an email) ------------- */
+
+/* Human-readable last-reset cause for the diag report. */
+static const char *reset_reason_str(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software (reboot/update)";
+    case ESP_RST_PANIC:     return "panic / exception";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_BROWNOUT:  return "brownout (power dip)";
+    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "unknown";
+    }
+}
+
+/*
+ * `diag` — gather every status the other commands show (version, config/NVS, WiFi,
+ * SD, drives, FDC+ stats) into one report, plus a few hardware facts a support reply
+ * wants (chip/MAC, uptime, free heap, last-reset cause). Read-only; no secrets echoed.
+ */
+static int cmd_diag(cli_console_t *c, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const config_t *cfg = config_get();
+
+    cli_write(c, "==== FDC+ Serial Disk Server diagnostics ====\r\n");
+
+    /* -- Firmware / hardware -- */
+    cli_printf(c, "Firmware:  %s %s\r\n", FDCSDS_PRODUCT, FDCSDS_VERSION_STRING);
+    cli_printf(c, "ESP-IDF:   %s\r\n", esp_get_idf_version());
+
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    /* IDF 5.x encodes silicon revision as major*100 + minor (e.g. 301 -> v3.1). */
+    cli_printf(c, "Chip:      ESP32 rev v%d.%d, %d core(s)\r\n",
+               chip.revision / 100, chip.revision % 100, chip.cores);
+
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    cli_printf(c, "MAC:       %02x:%02x:%02x:%02x:%02x:%02x\r\n",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    /* Seconds fit a 32-bit count for any realistic uptime (~136 years). */
+    unsigned long up = (unsigned long)(esp_timer_get_time() / 1000000);
+    cli_printf(c, "Uptime:    %lud %02lu:%02lu:%02lu\r\n",
+               up / 86400, (up % 86400) / 3600, (up % 3600) / 60, up % 60);
+    cli_printf(c, "Free heap: %lu bytes (min %lu since boot)\r\n",
+               (unsigned long)esp_get_free_heap_size(),
+               (unsigned long)esp_get_minimum_free_heap_size());
+    cli_printf(c, "Last boot: %s\r\n", reset_reason_str());
+
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    if (tm.tm_year < (2016 - 1900)) {
+        cli_write(c, "Time:      not set (NTP not synced; needs WiFi)\r\n");
+    } else {
+        char tbuf[64];
+        strftime(tbuf, sizeof tbuf, "%a %Y-%m-%d %H:%M:%S %Z", &tm);
+        cli_printf(c, "Time:      %s\r\n", tbuf);
+    }
+
+    /* -- Saved configuration (NVS) -- */
+    cli_write(c, "\r\n-- Configuration (NVS) --\r\n");
+    cli_printf(c, "Saved:     %s\r\n",
+               config_dirty() ? "NO - unsaved changes (run 'save')" : "yes");
+    cli_printf(c, "Hostname:  %s\r\n", cfg->wifi_name);
+    cli_printf(c, "FDC+ baud: %lu\r\n", (unsigned long)cfg->baud_rate);
+    cli_printf(c, "Log level: %s\r\n", log_level_name(cfg->log_level));
+    cli_printf(c, "Timezone:  %s\r\n", cfg->time_zone[0] ? cfg->time_zone : "(unset)");
+    cli_printf(c, "FTP user:  %s (password %s)\r\n",
+               cfg->ftp_user[0] ? cfg->ftp_user : "(unset)",
+               cfg->ftp_pass[0] ? "set" : "unset");
+    cli_printf(c, "OTA repo:  %s\r\n", cfg->ota_repo[0] ? cfg->ota_repo : "(unset)");
+
+    /* -- WiFi -- */
+    cli_write(c, "\r\n-- WiFi --\r\n");
+    net_status_t ns;
+    net_get_status(&ns);
+    cli_printf(c, "WiFi:      %s\r\n", ns.enabled ? "enabled" : "disabled");
+    cli_printf(c, "SSID:      %s (password %s)\r\n",
+               ns.ssid[0] ? ns.ssid : "(unset)",
+               cfg->wifi_pass[0] ? "set" : "unset");
+    if (ns.connected) {
+        cli_printf(c, "State:     connected  IP %s\r\n", ns.ip);
+        cli_printf(c, "AP:        %02x:%02x:%02x:%02x:%02x:%02x  RSSI %d dBm\r\n",
+                   ns.bssid[0], ns.bssid[1], ns.bssid[2],
+                   ns.bssid[3], ns.bssid[4], ns.bssid[5], ns.rssi);
+        cli_printf(c, "mDNS:      %s.local\r\n", cfg->wifi_name);
+    } else {
+        cli_printf(c, "State:     %s\r\n", ns.enabled ? "connecting/disconnected" : "idle");
+    }
+
+    /* -- SD card + autoexec -- */
+    cli_write(c, "\r\n-- SD card --\r\n");
+    if (!sd_mounted()) {
+        cli_write(c, "SD card:   not present / not mounted\r\n");
+    } else {
+        cli_write(c, "SD card:   present\r\n");
+        char path[16 + CONFIG_FILE_CAP];
+        bool have_autoexec = sd_path("autoexec.bat", path, sizeof path) >= 0 &&
+                             file_is_regular(path);
+        cli_printf(c, "autoexec.bat: %s\r\n", have_autoexec ? "present" : "none");
+    }
+
+    /* -- Drives (mount table) -- */
+    cli_write(c, "\r\n-- Drives --\r\n");
+    for (int i = 0; i < CONFIG_MAX_DRIVE; ++i) {
+        if (disk_is_mounted(i)) {
+            cli_printf(c, "%d: %s (%lu bytes)%s\r\n", i, disk_name(i),
+                       (unsigned long)disk_image_size(i),
+                       disk_is_readonly(i) ? " [read-only]" : "");
+        } else if (disk_is_remote(i)) {
+            cli_printf(c, "%d: %s (not ready)\r\n", i, disk_name(i));
+        } else {
+            cli_printf(c, "%d: (empty)\r\n", i);
+        }
+    }
+
+    /* -- FDC+ link + counters -- */
+    cli_write(c, "\r\n-- FDC+ link --\r\n");
+    fdc_stats_t s;
+    fdc_get_stats(&s);
+    cli_printf(c, "Link:      %lu baud\r\n", (unsigned long)fdc_baud());
+    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  not-rdy %lu  csum-err %lu  "
+                  "timeout %lu  unknown %lu\r\n",
+               (unsigned long)s.stat, (unsigned long)s.read, (unsigned long)s.writ,
+               (unsigned long)s.not_ready, (unsigned long)s.csum_err,
+               (unsigned long)s.timeouts, (unsigned long)s.unknown);
+    cli_printf(c, "Last op:   %s\r\n", s.last_op[0] ? s.last_op : "(none)");
+
+    cli_write(c, "==== end diagnostics ====\r\n");
+    return 0;
 }
 
 /* ---- help (defined last so it can list the live baud/log/tz value tables) --- */
