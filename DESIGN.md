@@ -306,6 +306,13 @@ The **8192-byte** track of the 8 MB format sets the **minimum track-buffer size*
 - Single track buffer sized to the largest supported track. **≥ 8192 bytes.**
   READ/WRIT must reject `len` larger than the buffer.
 - A 1-entry "last (drive,track,len)" cache may skip redundant SD reads (optional).
+- **[CLAUDE — resolved during M9b: real max transfer.]** The largest `len` the FDC+
+  ever requests is **137 × 32 = 4384 bytes** (32 sectors × 137-byte 8" sector). The
+  FDC+ never asks for an 8192-byte transfer — the 8 MB image's 8192-byte on-disk track
+  (§6.5) is a byte-offset unit (`track * len`), not a per-command transfer length. So
+  the **≥ 8192-byte buffer is deliberate headroom**, and a worst-case remote READ is
+  ~4384 B ≈ 5 TNFS datagrams + a seek (~6 round trips, ~0.3 s over WAN) — comfortably
+  inside the 7 s data timeout (§10.1).
 
 ### 6.7 LEDs
 - Status LED (built-in): on when a valid command is received; a hardware/`esp_timer`
@@ -654,6 +661,14 @@ chunking discipline as local `copy` and FTP. Copy uses a **transient** TNFS sess
 (open → stream → close), independent of any mounted-drive session. On any network error
 mid-copy, report failure and leave no partial file mounted (a partial SD file may remain,
 as with a failed local copy — noted, not cleaned in v1).
+
+- **Measured throughput [CLAUDE — observed during M9a].** A whole-file `copy` is
+  **latency-bound**, not bandwidth-bound: it streams sequential 1024-byte TNFS chunks,
+  each a full request/reply round trip. Pulling the 8 MB `CPM22-8MB-56K.DSK` from the
+  WAN test server `tnfs.mitsaltair.com` (~56 ms/round trip, ~8,800 chunks) took
+  **~497 s (~8.3 min)**. This is expected for a one-time staging transfer over a
+  high-latency link; a LAN `tnfsd` is far faster. It does **not** affect mounted-drive
+  track I/O, which fetches only the requested track (§10.1) and is warmed by the cache.
 
 ---
 
