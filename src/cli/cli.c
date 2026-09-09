@@ -223,7 +223,8 @@ void cli_feed(cli_console_t *c, char ch)
         return;
     }
 
-    /* Accept printable ASCII only; silently drop all else (incl. IAC 0xFF). */
+    /* Accept printable ASCII only; silently drop all other control bytes. (The
+     * network console strips Telnet IAC upstream, so none reach here — console.c.) */
     if (b >= 0x20 && b <= 0x7E) {
         if (c->len < CLI_LINE_MAX) {
             c->line[c->len++] = (char)b;

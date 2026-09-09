@@ -1,13 +1,14 @@
 /*
- * net.h — networking: WiFi STA, raw-TCP console (:23), mDNS, and NTP (DESIGN.md §9).
+ * net.h — networking: WiFi STA, Telnet console (:23), mDNS, and NTP (DESIGN.md §9).
  *
  * The `net` task family lives on core 0 (DESIGN.md §5.2) and must never touch the
  * latency-critical FDC path. WiFi connects only when enabled with an SSID set;
  * on connect it starts the TCP console, SNTP, and advertises <wifiName>.local.
  *
- * The TCP console on port 23 is a RAW byte-stream console, NOT the Telnet protocol
- * (DESIGN.md §9.2): no IAC/option negotiation. A `telnet` client reaches it because
- * we drop the stray IAC bytes in the line editor (§8); `nc host 23` works identically.
+ * The console on port 23 is a minimal Telnet server (DESIGN.md §9.2): it negotiates
+ * character-at-a-time mode with server-side echo and parses/strips IAC option
+ * bytes so they never leak into the command line (console.c). `nc host 23` also
+ * works — it sends no IAC and simply lacks local line editing.
  */
 #ifndef FDCSDS_NET_H
 #define FDCSDS_NET_H
@@ -21,7 +22,7 @@
 extern "C" {
 #endif
 
-/* Raw-TCP console port (DESIGN.md §9.2). Named 23 so `telnet` reaches it. */
+/* Telnet console port (DESIGN.md §9.2). The standard telnet port. */
 #define NET_CONSOLE_PORT 23
 
 /* Link-state snapshot for the `wifi` command (DESIGN.md §8.1 / §9.1). */

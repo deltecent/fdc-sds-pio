@@ -36,8 +36,10 @@ is configurable (`baud`); 403200 is the FDC+ high-speed rate.
 Reach the CLI two ways, both sharing the same command set:
 
 - **Serial** — `pio device monitor -b 115200` (USB/UART0).
-- **Network** — `nc <host>.local 23` (raw TCP, once WiFi is up). `telnet` also works;
-  stray IAC bytes are dropped (this is not a Telnet server).
+- **Network** — `telnet <host>.local` (port 23, once WiFi is up). It's a minimal
+  Telnet server: it negotiates character mode with server-side echo, so typing and
+  backspace work. `nc <host>.local 23` also works — it skips negotiation, so it relies
+  on its own local echo (no double echo) and lacks server-driven line editing.
 
 Commands accept unique prefixes (`ver` → `version`) and the aliases shown by `help`.
 The prompt is the host name; a leading `* ` means the config has unsaved edits.
@@ -110,7 +112,7 @@ save
 ```
 
 On connect the device advertises `<hostname>.local` (mDNS), syncs the clock over NTP,
-and starts the raw-TCP console (:23) and an FTP server (default login `fdc` / `fdc`,
+and starts the Telnet console (:23) and an FTP server (default login `fdc` / `fdc`,
 changeable with `ftpuser` / `ftppass`). Upload `.dsk` images straight to the SD card
 over FTP.
 

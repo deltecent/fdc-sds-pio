@@ -5,8 +5,9 @@
  * console carries its OWN line-editor state and output sink (DESIGN.md §5.2:
  * "no single mutable activeConsole written from two tasks" — output is routed
  * per session, never through a shared global). The line editor accepts printable
- * ASCII plus a few control keys and silently drops everything else, which also
- * discards stray Telnet IAC (0xFF) bytes without any Telnet handling (§8/§9.2).
+ * ASCII plus a few control keys (incl. BS/DEL) and silently drops other control
+ * bytes; Telnet IAC negotiation is parsed and stripped by the network console
+ * before bytes reach here, so none leak into the command line (§8/§9.2).
  */
 #ifndef FDCSDS_CLI_H
 #define FDCSDS_CLI_H

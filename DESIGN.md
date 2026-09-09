@@ -27,8 +27,8 @@ In scope for v1:
 
 - Serve up to **4 drives** (0–3), each backed by a disk-image file on SD.
 - FDC+ serial protocol: `STAT`, `READ`, `WRIT` (+ `WSTA`) with checksums.
-- Console CLI over **USB serial** and a **raw-TCP network console** on port 23
-  (reachable with a `telnet`/`nc` client; not the Telnet protocol — see §9.2).
+- Console CLI over **USB serial** and a **network console** on port 23, a minimal
+  Telnet server (also reachable with `nc` — see §9.2).
 - **WiFi** station mode; **FTP** for image transfer.
 - **OTA** firmware update: from `/firmware.bin` on SD **and** over the network from a
   GitHub release (§11.1).
@@ -366,8 +366,8 @@ Rules:
 One command interpreter serves **both** consoles:
 
 - **Serial** (UART0/USB, 115200), local echo **on**.
-- **Network console** (TCP :23), echo **off** (client echoes); available only when
-  WiFi up. This is a **raw TCP line console**, *not* the Telnet protocol — see §9.2.
+- **Network console** (TCP :23), a **minimal Telnet server** with server-side echo
+  **on** (negotiated character mode); available only when WiFi up — see §9.2.
 - **HTTP web GUI** — **[CLAUDE — resolved: defer to a post-v1 phase, keep the door open].**
   Feasible: the ESP32 comfortably runs a web server (IDF `esp_http_server` /
   `esp_https_server`) and could offer mount/unmount, config edit, an
@@ -383,9 +383,9 @@ Line editor: handle backspace (`\b`/0x7F), CR/LF (collapse CRLF), Ctrl-D on the 
 console = disconnect, bounded input buffer (~80 bytes). Track the "active console" so
 command output goes to the right stream. Commands support abbreviations/aliases. The
 editor accepts printable ASCII plus that handful of control keys and **silently drops
-any other byte** — which also means a stray Telnet `IAC` (0xFF) sequence from a
-`telnet` client is discarded rather than parsed (§9.2), so no Telnet handling is
-needed.
+any other byte**. Telnet `IAC` (0xFF) negotiation from a `telnet` client is parsed and
+stripped by the network console *before* bytes reach the editor (§9.2), so no `IAC`
+byte ever leaks into a command line.
 
 ### 8.1 Command set **[RESOLVED: this is the locked v1 set]**
 
@@ -513,23 +513,30 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
   instead of chasing its DHCP IP. Enable alongside WiFi; harmless if the client LAN
   lacks mDNS.
 
-### 9.2 Network console (raw TCP, "telnet"-reachable)
-- TCP :23. On connect, print banner + prompt and route the CLI to the socket stream.
-  Serial console stays active concurrently.
-- **Not the Telnet protocol.** This is a plain byte-stream TCP console: a socket the
-  CLI reads lines from and writes output to, nothing more. There is **no Telnet option
-  negotiation, no `IAC`/0xFF command handling, no line-mode/echo negotiation, no
-  binary-mode escaping.** We named the port 23 only so the ordinary `telnet` client
-  reaches it; `nc host 23` works identically (and, being negotiation-free, is the
-  cleaner client).
-- Consequences of raw mode, by design:
-  - A real `telnet` client may emit a few `IAC` (0xFF …) negotiation bytes at connect.
-    We **ignore/drop** them (§8 line editor drops non-handled bytes); we never reply,
-    so the client falls back to its defaults. `nc` sends none.
-  - The client is expected to **echo locally** (server echo is off, §8); with `nc`,
-    typed characters may not echo — that's the client's business, not ours.
-  - The console carries text only; the binary FDC path is a separate UART, so 0xFF in
-    the byte stream is never meaningful here.
+### 9.2 Network console (minimal Telnet server)
+- TCP :23. On connect, negotiate character mode, print banner + prompt, and route the
+  CLI to the socket stream. Serial console stays active concurrently.
+- **A minimal Telnet server, not a raw byte stream.** Earlier this port was a plain
+  byte stream that just dropped `IAC` (0xFF); that broke real clients. macOS/BSD
+  `telnet` opens by sending option negotiation, and some option *numbers* land in
+  printable ASCII (AUTHENTICATION 37 = `%`, TERMINAL-SPEED 32 = space, LINEMODE 34 =
+  `"`, …). A drop-0xFF-only filter lets those option bytes leak into the buffer and
+  corrupt the **first** line typed — the "first command is always ignored" bug. So the
+  console now parses Telnet properly:
+  - **On connect** it sends `IAC WILL ECHO` + `IAC WILL SUPPRESS-GO-AHEAD`, putting the
+    client in character-at-a-time mode and turning its local echo off.
+  - **Inbound `IAC` sequences** (WILL/WONT/DO/DONT + option, and `SB … SE`
+    subnegotiation) are consumed by a small state machine, never reaching the line
+    editor. Options we didn't offer are refused (`WONT`/`DONT`) so a well-behaved
+    client isn't left waiting.
+  - **Server-side echo turns on only when the client accepts `WILL ECHO`** (replies
+    `DO ECHO`). Once it does, the server draws each keystroke and erases on backspace
+    (`\b \b`), so editing works over `telnet` and a backspace no longer shows as `^H`.
+- `nc host 23` still works: it sends no `IAC`, so it never replies `DO ECHO` and server
+  echo stays **off** — its own cooked-mode local echo shows typing (no double echo). It
+  just lacks the server-driven line editing a `telnet` client gets.
+- The console carries text only; the binary FDC path is a separate UART, so a genuine
+  0xFF data byte is never meaningful here.
 
 ### 9.3 ssh console
 - SSH :22. On connect, print banner + prompt and route the CLI to the Ssh stream.
