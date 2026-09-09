@@ -42,6 +42,12 @@ Reach the CLI two ways, both sharing the same command set:
 Commands accept unique prefixes (`ver` → `version`) and the aliases shown by `help`.
 The prompt is the host name; a leading `* ` means the config has unsaved edits.
 
+> **macOS users:** if the console floods with a repeating fragment of the last log line
+> when you connect after the board has booted, that is a bug in Apple's built-in CP210x
+> driver (`AppleUSBSLCOM`), not the firmware — press any key or use `pio device monitor`
+> to avoid it. Details and an Apple bug-report template:
+> [docs/macos-serial-flood.md](docs/macos-serial-flood.md).
+
 ### Commands
 
 | Command | Purpose |
