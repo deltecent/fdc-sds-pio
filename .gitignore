@@ -5,6 +5,10 @@
 *.elf
 *.map
 
+# The network-OTA payload must be tracked so raw.githubusercontent.com can serve it
+# from master (DESIGN.md §11.1); exempt it from the *.bin rule above.
+!ota/firmware.bin
+
 # ESP-IDF / PlatformIO generated config (regenerated from sdkconfig.defaults).
 # Keep sdkconfig.defaults tracked; ignore the live sdkconfig and per-env copies.
 sdkconfig
