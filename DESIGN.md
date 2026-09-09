@@ -459,16 +459,19 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
 | Name | POSIX `TZ` | Notes |
 |---|---|---|
 | `UTC` | `UTC0` | Default; no DST |
-| `Eastern` | `EST5EDT,M3.2.0,M11.1.0` | US DST rules |
-| `Central` | `CST6CDT,M3.2.0,M11.1.0` | |
-| `Mountain` | `MST7MDT,M3.2.0,M11.1.0` | |
+| `Eastern` | `EST5EDT` | US DST |
+| `Central` | `CST6CDT` | |
+| `Mountain` | `MST7MDT` | |
 | `Arizona` | `MST7` | Mountain, no DST |
-| `Pacific` | `PST8PDT,M3.2.0,M11.1.0` | |
-| `Alaska` | `AKST9AKDT,M3.2.0,M11.1.0` | |
+| `Pacific` | `PST8PDT` | |
+| `Alaska` | `AKST9AKDT` | |
 | `Hawaii` | `HST10` | No DST |
 
-> DST transition rules (`M3.2.0`/`M11.1.0` = 2nd Sun of Mar / 1st Sun of Nov) are the
-> current US rules; hardcoding them avoids shipping the full IANA tz database.
+> The DST zones carry no explicit transition rule (`,M3.2.0,M11.1.0`). newlib 4.3.0
+> (the ESP-IDF toolchain's libc) defaults a bare US DST abbreviation to the current US
+> rule — 2nd Sun of Mar / 1st Sun of Nov — so `EST5EDT` alone transitions correctly.
+> The rules were dropped for legibility since only US zones are supported; a non-US user
+> passing a raw `TZ` string can still include their own rule.
 
 ### 8.4 Directory wildcards **[RESOLVED]**
 

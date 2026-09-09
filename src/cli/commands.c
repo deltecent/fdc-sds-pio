@@ -1084,12 +1084,12 @@ static const struct {
     const char *tz;
 } k_tzs[] = {
     { "UTC",      "UTC0" },
-    { "Eastern",  "EST5EDT,M3.2.0,M11.1.0" },
-    { "Central",  "CST6CDT,M3.2.0,M11.1.0" },
-    { "Mountain", "MST7MDT,M3.2.0,M11.1.0" },
+    { "Eastern",  "EST5EDT" },
+    { "Central",  "CST6CDT" },
+    { "Mountain", "MST7MDT" },
     { "Arizona",  "MST7" },
-    { "Pacific",  "PST8PDT,M3.2.0,M11.1.0" },
-    { "Alaska",   "AKST9AKDT,M3.2.0,M11.1.0" },
+    { "Pacific",  "PST8PDT" },
+    { "Alaska",   "AKST9AKDT" },
     { "Hawaii",   "HST10" },
 };
 #define TZ_COUNT (sizeof(k_tzs) / sizeof(k_tzs[0]))
