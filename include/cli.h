@@ -41,7 +41,10 @@ struct cli_console {
     cli_write_fn write;              /* required output sink */
     void        *ctx;                /* passed back to write() */
     bool         echo;              /* echo typed chars (serial: on; TCP: off, §9.2) */
-    bool         disconnect;        /* set by logout/exit + Ctrl-D; net loop honors it */
+    bool         is_network;        /* network (TCP/Telnet) console vs the serial console;
+                                       only a network console can be logged out/disconnected */
+    bool         disconnect;        /* set by logout/exit + Ctrl-D on a network console; the
+                                       net loop closes the socket. Never set for serial. */
     int          exec_depth;        /* batch-file nesting depth (exec/autorun, §8.2) */
     size_t       len;               /* bytes currently in line[] */
     bool         saw_cr;            /* last byte was CR, for CRLF collapse */
@@ -54,8 +57,12 @@ typedef int (*cli_cmd_fn)(cli_console_t *c, int argc, char **argv);
 typedef struct {
     const char *name;                /* canonical command name */
     const char *alias;               /* single alias, or NULL */
-    const char *help;                /* one-line help text */
+    const char *help;                /* one-line summary shown in the `help` list */
     cli_cmd_fn  fn;
+    const char *detail;              /* full help for `help <command>`: what it does +
+                                        usage + valid arguments; NULL = summary is enough.
+                                        `help` lists valid values so a user never has to
+                                        enter a bad argument to discover them. */
 } cli_command_t;
 
 /* The locked v1 command table (DESIGN.md §8.1), defined in commands.c. */

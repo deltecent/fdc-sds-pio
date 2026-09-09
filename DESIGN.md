@@ -419,9 +419,14 @@ byte ever leaks into a command line.
 | `copy` / `cp` | src dst | Copy a file (chunked I/O, §5.2); `src`/`dst` may be an SD name **or** a `tnfs://` URL (§10.1) |
 | `loopback` / `lb` | — | FDC+ serial loopback test |
 | `time` / `date` | — | Show current (UTC) time |
-| `tz` | timezone | Set/show timezone; `tz ?` lists the US zones in §8.3 |
+| `tz` | timezone | Set/show timezone; `help tz` lists the US zones in §8.3 |
 
 - All filename args resolve relative to SD root.
+- Help: `help` lists every command with a one-line summary; `help <command>` (or the
+  `?` alias, `? <command>`) prints that command's full help — what it does, its usage,
+  and its valid arguments, including the live value lists for `baud`/`log`/`tz` so a user
+  never has to enter a bad argument to discover the valid ones. There is no separate
+  `<command> ?` help form. Entering a bad argument may still print a terse `usage:` line.
 - Bounds-check drive numbers as `0..MAX_DRIVE-1` (fix the old `> MAX_DRIVE` off-by-one).
 - The set stays close to the original baseline at the level of command *names*: the new
   names beyond it are `ftpuser`/`ftppass` (§9.4) and `log` (the console-verbosity knob,

@@ -217,9 +217,12 @@ void cli_feed(cli_console_t *c, char ch)
         return;
     }
 
-    /* Ctrl-D requests disconnect (honored by the network console; serial ignores). */
+    /* Ctrl-D requests disconnect — only on a network console; the serial console has
+     * no connection to close, so it ignores it. */
     if (b == 0x04) {
-        c->disconnect = true;
+        if (c->is_network) {
+            c->disconnect = true;
+        }
         return;
     }
 

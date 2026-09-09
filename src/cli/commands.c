@@ -69,37 +69,148 @@ static int cmd_ftppass(cli_console_t *c, int argc, char **argv);
 static int cmd_update(cli_console_t *c, int argc, char **argv);
 static int cmd_exec(cli_console_t *c, int argc, char **argv);
 
-/* Order here is the order `help` prints. */
+/*
+ * Full per-command help, shown by `help <command>` under the one-line summary. Each
+ * string picks up where the summary leaves off — extra behavior, usage, and (where
+ * relevant) valid arguments — so it never just restates the summary the reader has
+ * already seen. For commands whose choices come from a table (baud/log/tz), cmd_help
+ * appends the live list, so help can't drift from what the command actually accepts.
+ * Commands whose one-line summary already says everything leave detail NULL.
+ */
+static const char D_help[] =
+    "usage: help [<command>]\r\n"
+    "  '?' is a synonym for help  (e.g. '? mount')\r\n";
+static const char D_baud[] =
+    "Sets the speed of the serial link to the FDC+ board - not this USB console,\r\n"
+    "which is unaffected. The FDC+ S-100 board must be set to the same rate or the\r\n"
+    "two cannot talk. A new rate applies immediately; run 'save' to keep it across\r\n"
+    "reboots.\r\n"
+    "usage: baud [<rate>]        (with no rate, shows the current speed)\r\n";
+static const char D_dir[] =
+    "With a pattern, shows only matching files; with a tnfs:// URL, lists a\r\n"
+    "directory on a TNFS server.\r\n"
+    "usage: dir [<pattern> | tnfs://<host>/<path>]\r\n"
+    "examples:\r\n"
+    "  dir                 list every file\r\n"
+    "  dir *.DSK           list only .DSK files\r\n"
+    "  dir tnfs://192.168.1.10/disks\r\n";
+static const char D_mount[] =
+    "With no arguments, shows what is mounted on each drive.\r\n"
+    "usage: mount [<drive> <file | tnfs://host/path>]\r\n"
+    "  <drive> is 0-3\r\n"
+    "  <file> is an image on the SD card; a tnfs:// URL mounts it over the network\r\n"
+    "examples:\r\n"
+    "  mount               show the mount table\r\n"
+    "  mount 0 CPM22.DSK\r\n"
+    "  mount 1 tnfs://192.168.1.10/disks/GAMES.DSK\r\n";
+static const char D_unmount[] =
+    "usage: unmount <drive>      (<drive> is 0-3)\r\n";
+static const char D_log[] =
+    "A new level applies immediately; run 'save' to keep it across reboots.\r\n"
+    "usage: log [<level>]        (with no level, shows the current setting)\r\n";
+static const char D_save[] =
+    "Covers mounts, WiFi, baud, timezone, and the rest, so the device restores\r\n"
+    "them automatically after a reboot or power loss.\r\n"
+    "usage: save\r\n";
+static const char D_wipe[] =
+    "Takes effect at once. Does not touch the SD card or its disk images.\r\n"
+    "usage: wipe\r\n";
+static const char D_stats[] =
+    "Reports the FDC+ link speed and running counts since boot (or the last\r\n"
+    "'clear'):\r\n"
+    "  STAT / READ / WRIT   commands the FDC+ has issued, by type\r\n"
+    "  not-rdy              requests to a drive with no image mounted\r\n"
+    "  csum-err             commands rejected for a bad checksum\r\n"
+    "  timeout              commands that did not complete in time\r\n"
+    "  unknown              unrecognized commands\r\n"
+    "  last                 the most recent command handled\r\n"
+    "usage: stats\r\n";
+static const char D_dump[] =
+    "16 bytes per line, like xxd, for troubleshooting. With no arguments, shows\r\n"
+    "the last track the FDC+ transferred.\r\n"
+    "usage: dump [<drive> [<track> [<length>]]]\r\n"
+    "  <drive> is 0-3; <track> defaults to 0; <length> defaults to 256 bytes\r\n";
+static const char D_wifi[] =
+    "Set the network first with 'ssid' and 'pass'.\r\n"
+    "usage: wifi [on | off]      (with no argument, shows status: SSID, IP, signal)\r\n";
+static const char D_ssid[] =
+    "usage: ssid [<network-name>]   (with no name, shows the current SSID)\r\n";
+static const char D_pass[] =
+    "For safety the stored password is never shown - only whether one is set.\r\n"
+    "usage: pass <password>\r\n";
+static const char D_hostname[] =
+    "The name is used on the network (<name>.local) and shown in the prompt.\r\n"
+    "usage: hostname [<name>]    (with no name, shows the current name)\r\n";
+static const char D_ftpuser[] =
+    "Takes effect on the next FTP connection.\r\n"
+    "usage: ftpuser [<name>]     (with no name, shows the current username)\r\n";
+static const char D_ftppass[] =
+    "The stored password is never shown. Takes effect on the next FTP connection.\r\n"
+    "usage: ftppass <password>\r\n";
+static const char D_update[] =
+    "usage: update [local | ota]\r\n"
+    "  update            show the running, SD-card, and available versions\r\n"
+    "  update local      install /firmware.bin from the SD card\r\n"
+    "  update ota        download and install the latest release over WiFi\r\n";
+static const char D_type[] =
+    "Reads the file from the SD card.\r\n"
+    "usage: type <file>\r\n";
+static const char D_exec[] =
+    "One command per line; lines starting with '#' are comments. The .bat\r\n"
+    "extension is optional.\r\n"
+    "usage: exec <file>\r\n";
+static const char D_delete[] =
+    "This cannot be undone.\r\n"
+    "usage: delete <file>\r\n";
+static const char D_rename[] =
+    "usage: rename <old-name> <new-name>\r\n";
+static const char D_copy[] =
+    "Each of <src> and <dst> may be an SD-card file or a tnfs:// URL, so this\r\n"
+    "also transfers files to or from a TNFS server.\r\n"
+    "usage: copy <src> <dst>\r\n"
+    "examples:\r\n"
+    "  copy CPM22.DSK BACKUP.DSK\r\n"
+    "  copy tnfs://192.168.1.10/disks/GAMES.DSK GAMES.DSK\r\n";
+static const char D_loopback[] =
+    "Sends a 256-byte pattern out the FDC+ serial port and checks it comes back.\r\n"
+    "Jumper the FDC+ TX and RX pins together first.\r\n"
+    "usage: loopback\r\n";
+static const char D_tz[] =
+    "Used by 'time'. Accepts a US zone name (listed below) or a raw POSIX TZ\r\n"
+    "string. A change applies immediately.\r\n"
+    "usage: tz [<zone>]          (with no zone, shows the current setting)\r\n";
+
+/* Grouped by milestone/topic; `help` sorts this into alphabetical order for display. */
 static const cli_command_t k_commands[] = {
-    { "help",     "?",      "Show command help",              cmd_help     },
-    { "version",  NULL,     "Show firmware version",          cmd_version  },
-    { "baud",     NULL,     "Set FDC+ baud rate",             cmd_baud     },
-    { "dir",      "ls",     "List files [spec | tnfs://url]", cmd_dir      },
-    { "mount",    NULL,     "Show mount table / mount image", cmd_mount    },
-    { "unmount",  "umount", "Unmount a drive",                cmd_unmount  },
-    { "stats",    NULL,     "Show FDC+ statistics",           cmd_stats    },
-    { "clear",    NULL,     "Zero FDC+ statistics",           cmd_clear    },
-    { "log",      NULL,     "Set console log level",          cmd_log      },
-    { "save",     "write",  "Persist config to NVS",          cmd_save     },
-    { "wipe",     NULL,     "Erase NVS, reload defaults",     cmd_wipe     },
-    { "dump",     NULL,     "Hex-dump a track buffer",        cmd_dump     },
-    { "wifi",     NULL,     "Show/enable/disable WiFi",       cmd_wifi     },
-    { "ssid",     NULL,     "Set WiFi SSID",                  cmd_ssid     },
-    { "pass",     NULL,     "Set WiFi password",              cmd_pass     },
-    { "hostname", NULL,     "Set device/host name",           cmd_hostname },
-    { "ftpuser",  NULL,     "Set FTP username",               cmd_ftpuser  },
-    { "ftppass",  NULL,     "Set FTP password",               cmd_ftppass  },
-    { "update",   NULL,     "Firmware: status, or 'local'/'ota' to install", cmd_update },
-    { "type",     "cat",    "Print a text file",              cmd_type     },
-    { "exec",     "run",    "Run a batch file of commands",   cmd_exec     },
-    { "logout",   "exit",   "Disconnect network client",      cmd_logout   },
-    { "delete",   "rm",     "Delete a file",                  cmd_delete   },
-    { "rename",   "mv",     "Rename a file",                  cmd_rename   },
-    { "copy",     "cp",     "Copy a file",                    cmd_copy     },
-    { "loopback", "lb",     "FDC+ serial loopback test",      cmd_loopback },
-    { "time",     "date",   "Show current time",              cmd_time     },
-    { "tz",       NULL,     "Set/show timezone (tz ? lists)", cmd_tz       },
-    { "reboot",   NULL,     "Clean shutdown + restart",       cmd_reboot   },
+    { "help",     "?",      "List commands, or show help for one", cmd_help,   D_help     },
+    { "version",  NULL,     "Show the firmware version",           cmd_version, NULL      },
+    { "baud",     NULL,     "Show or set the FDC+ link speed",     cmd_baud,   D_baud     },
+    { "dir",      "ls",     "List files on SD or a TNFS server",   cmd_dir,    D_dir      },
+    { "mount",    NULL,     "Mount a disk image on a drive",       cmd_mount,  D_mount    },
+    { "unmount",  "umount", "Unmount a drive",                     cmd_unmount, D_unmount },
+    { "stats",    NULL,     "Show FDC+ statistics",                cmd_stats,  D_stats    },
+    { "clear",    NULL,     "Reset FDC+ statistics to zero",       cmd_clear,  NULL       },
+    { "log",      NULL,     "Show or set console logging detail",  cmd_log,    D_log      },
+    { "save",     "write",  "Save settings so they survive reboot", cmd_save,  D_save     },
+    { "wipe",     NULL,     "Erase saved settings; restore defaults", cmd_wipe, D_wipe    },
+    { "dump",     NULL,     "Hex-dump a disk track",               cmd_dump,   D_dump     },
+    { "wifi",     NULL,     "Show WiFi status, or turn it on/off", cmd_wifi,   D_wifi     },
+    { "ssid",     NULL,     "Show or set the WiFi network name",   cmd_ssid,   D_ssid     },
+    { "pass",     NULL,     "Set the WiFi password",               cmd_pass,   D_pass     },
+    { "hostname", NULL,     "Show or set the device name",         cmd_hostname, D_hostname },
+    { "ftpuser",  NULL,     "Show or set the FTP username",        cmd_ftpuser, D_ftpuser },
+    { "ftppass",  NULL,     "Set the FTP password",                cmd_ftppass, D_ftppass },
+    { "update",   NULL,     "Show versions, or install an update", cmd_update, D_update   },
+    { "type",     "cat",    "Print a text file",                   cmd_type,   D_type     },
+    { "exec",     "run",    "Run a batch file of commands",        cmd_exec,   D_exec     },
+    { "logout",   "exit",   "Disconnect this network session",     cmd_logout, NULL       },
+    { "delete",   "rm",     "Delete a file from SD",               cmd_delete, D_delete   },
+    { "rename",   "mv",     "Rename a file on SD",                 cmd_rename, D_rename   },
+    { "copy",     "cp",     "Copy a file (SD or TNFS)",            cmd_copy,   D_copy     },
+    { "loopback", "lb",     "Run the FDC+ serial loopback test",   cmd_loopback, D_loopback },
+    { "time",     "date",   "Show the current date and time",      cmd_time,   NULL       },
+    { "tz",       NULL,     "Show or set the timezone",            cmd_tz,     D_tz       },
+    { "reboot",   NULL,     "Restart the device",                  cmd_reboot, NULL       },
 };
 
 #define CMD_COUNT (sizeof(k_commands) / sizeof(k_commands[0]))
@@ -136,38 +247,8 @@ static bool resolve(cli_console_t *c, const char *name, char *buf, size_t len)
 
 /* ---- handlers -------------------------------------------------------------- */
 
-static int cmd_help(cli_console_t *c, int argc, char **argv)
-{
-    if (argc > 1) {
-        for (size_t i = 0; i < CMD_COUNT; ++i) {
-            const cli_command_t *t = &k_commands[i];
-            if (strcasecmp(argv[1], t->name) == 0 ||
-                (t->alias && strcasecmp(argv[1], t->alias) == 0)) {
-                if (t->alias) {
-                    cli_printf(c, "%s (%s) - %s\r\n", t->name, t->alias, t->help);
-                } else {
-                    cli_printf(c, "%s - %s\r\n", t->name, t->help);
-                }
-                return 0;
-            }
-        }
-        cli_printf(c, "%s: no such command\r\n", argv[1]);
-        return 1;
-    }
-
-    cli_write(c, "Commands:\r\n");
-    for (size_t i = 0; i < CMD_COUNT; ++i) {
-        const cli_command_t *t = &k_commands[i];
-        char name[24];
-        if (t->alias) {
-            snprintf(name, sizeof name, "%s/%s", t->name, t->alias);
-        } else {
-            snprintf(name, sizeof name, "%s", t->name);
-        }
-        cli_printf(c, "  %-16s %s\r\n", name, t->help);
-    }
-    return 0;
-}
+/* cmd_help is defined at the end of the file so it can list the live baud/log/tz
+ * value tables (which are declared lower down). */
 
 static int cmd_version(cli_console_t *c, int argc, char **argv)
 {
@@ -1004,16 +1085,9 @@ static int cmd_tz(cli_console_t *c, int argc, char **argv)
         cli_printf(c, "timezone: %s\r\n", config_get()->time_zone);
         return 0;
     }
-    if (strcmp(argv[1], "?") == 0) {
-        cli_write(c, "Timezones (name -> POSIX TZ):\r\n");
-        for (size_t i = 0; i < TZ_COUNT; ++i) {
-            cli_printf(c, "  %-9s %s\r\n", k_tzs[i].name, k_tzs[i].tz);
-        }
-        cli_write(c, "Or pass a raw POSIX TZ string.\r\n");
-        return 0;
-    }
 
-    /* Accept a US name (case-insensitive) or a raw POSIX TZ string (§8.3). */
+    /* Accept a US name (case-insensitive) or a raw POSIX TZ string (§8.3).
+     * The list of names is shown by `help tz`. */
     const char *posix = NULL;
     for (size_t i = 0; i < TZ_COUNT; ++i) {
         if (strcasecmp(argv[1], k_tzs[i].name) == 0) {
@@ -1038,8 +1112,13 @@ static int cmd_logout(cli_console_t *c, int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+    /* Only a network session can be logged out; the USB serial console stays open. */
+    if (!c->is_network) {
+        cli_write(c, "logout applies only to network sessions\r\n");
+        return 0;
+    }
     cli_write(c, "Goodbye\r\n");
-    c->disconnect = true; /* honored by the TCP console; the serial console ignores it */
+    c->disconnect = true; /* the TCP console loop closes the socket */
     return 0;
 }
 
@@ -1196,4 +1275,88 @@ static int cmd_exec(cli_console_t *c, int argc, char **argv)
         return 1;
     }
     return cli_exec_batch(c, argv[1]) == 0 ? 0 : 1;
+}
+
+/* ---- help (defined last so it can list the live baud/log/tz value tables) --- */
+
+static int cmd_help(cli_console_t *c, int argc, char **argv)
+{
+    if (argc > 1) {
+        /* `help <command>`: full help for one command. `? <command>` lands here too,
+         * since `?` is help's alias. */
+        const cli_command_t *t = NULL;
+        for (size_t i = 0; i < CMD_COUNT; ++i) {
+            if (strcasecmp(argv[1], k_commands[i].name) == 0 ||
+                (k_commands[i].alias && strcasecmp(argv[1], k_commands[i].alias) == 0)) {
+                t = &k_commands[i];
+                break;
+            }
+        }
+        if (!t) {
+            cli_printf(c, "%s: no such command (try 'help')\r\n", argv[1]);
+            return 1;
+        }
+
+        if (t->alias) {
+            cli_printf(c, "%s (%s) - %s\r\n", t->name, t->alias, t->help);
+        } else {
+            cli_printf(c, "%s - %s\r\n", t->name, t->help);
+        }
+        if (t->detail) {
+            cli_write(c, "\r\n");
+            cli_write(c, t->detail);
+        }
+
+        /* Append the live list of valid values for the enumerated commands, so help
+         * always matches exactly what the command accepts (no drift). */
+        if (t->fn == cmd_baud) {
+            cli_write(c, "valid rates:");
+            for (size_t i = 0; i < BAUD_COUNT; ++i) {
+                cli_printf(c, " %lu", (unsigned long)k_bauds[i]);
+            }
+            cli_write(c, "\r\n");
+        } else if (t->fn == cmd_log) {
+            cli_write(c, "levels:");
+            for (size_t i = 0; i < LOG_LEVEL_COUNT; ++i) {
+                cli_printf(c, " %s", k_log_levels[i].name);
+            }
+            cli_write(c, "  (also off = none, on = info)\r\n");
+        } else if (t->fn == cmd_tz) {
+            cli_write(c, "zones (name -> POSIX TZ):\r\n");
+            for (size_t i = 0; i < TZ_COUNT; ++i) {
+                cli_printf(c, "  %-9s %s\r\n", k_tzs[i].name, k_tzs[i].tz);
+            }
+        }
+        return 0;
+    }
+
+    /* List commands alphabetically by name (insertion sort over a pointer index, so the
+     * table itself keeps its milestone grouping). */
+    const cli_command_t *sorted[CMD_COUNT];
+    for (size_t i = 0; i < CMD_COUNT; ++i) {
+        sorted[i] = &k_commands[i];
+    }
+    for (size_t i = 1; i < CMD_COUNT; ++i) {
+        const cli_command_t *key = sorted[i];
+        size_t j = i;
+        while (j > 0 && strcasecmp(sorted[j - 1]->name, key->name) > 0) {
+            sorted[j] = sorted[j - 1];
+            --j;
+        }
+        sorted[j] = key;
+    }
+
+    cli_write(c, "Commands:\r\n");
+    for (size_t i = 0; i < CMD_COUNT; ++i) {
+        const cli_command_t *t = sorted[i];
+        char name[24];
+        if (t->alias) {
+            snprintf(name, sizeof name, "%s/%s", t->name, t->alias);
+        } else {
+            snprintf(name, sizeof name, "%s", t->name);
+        }
+        cli_printf(c, "  %-16s %s\r\n", name, t->help);
+    }
+    cli_write(c, "\r\nType 'help <command>' for full help on one command.\r\n");
+    return 0;
 }

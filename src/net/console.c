@@ -166,6 +166,7 @@ static void serve_client(int fd)
      * (DO ECHO). So a real telnet client gets server-side echo + backspace editing,
      * while `nc` (which never negotiates) keeps its own local echo — no double echo. */
     cli_console_init(&con, sock_write, (void *)(intptr_t)fd, false);
+    con.is_network = true; /* logout/exit + Ctrl-D may close this connection */
 
     telnet_t tn = { .state = TN_DATA, .cmd = 0 };
     telnet_start(fd); /* offer WILL ECHO + WILL SGA before the banner */
