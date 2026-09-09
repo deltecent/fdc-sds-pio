@@ -31,7 +31,7 @@ extern "C" {
 #define CONFIG_TZ_CAP   41  /* timeZone  ≤40 */
 #define CONFIG_FTP_CAP  33  /* ftpUser/ftpPass ≤32 */
 #define CONFIG_REPO_CAP 65  /* otaRepo   ≤64 */
-#define CONFIG_FILE_CAP 65  /* Drive<n> filename ≤64 (DESIGN.md §10) */
+#define CONFIG_FILE_CAP 129 /* Drive<n>: SD filename or tnfs:// URL ≤128 (DESIGN.md §7/§10.1) */
 
 /* In-memory configuration (mirrors the NVS schema in DESIGN.md §7). */
 typedef struct {

@@ -617,8 +617,22 @@ only the *backing* differs.
   waits under its longer *data* timeout (~7 s, §6.4) rather than the 1 s command timeout;
   treat TNFS as **best-effort** — the owner may need a lower baud for remote drives.
   Validate timing on real hardware before declaring TNFS done (plan gate).
+  - **[CLAUDE — resolved during M9b: dispatch model].** A dedicated **disk-I/O worker
+    task pinned to core 0** owns every TNFS session and performs all remote
+    read/write/mount/close. `disk_read_track`/`disk_write_track` detect a remote drive,
+    hand the operation to the worker and **block the caller** (the fdc task) on a
+    completion semaphore under a ~6 s bound (< the 7 s data timeout); a caller that times
+    out early hands the job to the worker to finish and free (so an abandoned read still
+    warms the cache for the FDC's retry). The SD mutex is **not** held across a remote
+    round trip — the worker copies the fetched track into the shared buffer under the lock
+    only after the network I/O completes. Local track I/O is unchanged: inline under the
+    mutex. Read-ahead beyond the 1-entry cache is deferred until on-hardware measurement
+    shows it is needed.
 - **Read-only option.** Default **read-write** to match SD; allow a mount to be flagged
   read-only (WRIT → `Not Ready`) for servers the owner does not want written.
+  - **[CLAUDE — resolved during M9b].** Read-only is derived, not configured: a remote
+    mount opens `O_RDWR` and, if the server refuses, retries `O_RDONLY` and marks the
+    drive read-only (WRIT → write-error). No separate URL syntax in v1.
 - **Lifecycle / ordering.** Remote mounts need the network, so a `tnfs://` `Drive<n>` is
   **not** mounted at boot step 5 with the SD drives; it is deferred until WiFi connects
   (step 9), mounted then, re-mounted on reconnect, and dropped to not-ready on

@@ -258,8 +258,10 @@ static void handle_writ(void)
 
     led_drive_select(drive);
 
-    /* Ready iff the drive is mounted and the length fits our track buffer. */
-    bool ready = (len > 0 && len <= DISK_TRACK_BUF_SIZE && disk_is_mounted(drive));
+    /* Ready iff the drive is mounted read-write and the length fits our track buffer.
+     * A read-only (remote) drive answers Not Ready to WRIT (DESIGN.md §10.1). */
+    bool ready = (len > 0 && len <= DISK_TRACK_BUF_SIZE && disk_is_mounted(drive) &&
+                  !disk_is_readonly(drive));
     build_resp("WRIT", ready ? FDC_RESP_OK : FDC_RESP_NOT_READY, 0);
     send(s_resp, FDC_BLOCK_LEN);
 

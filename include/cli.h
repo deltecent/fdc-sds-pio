@@ -18,8 +18,10 @@
 extern "C" {
 #endif
 
-/* Bounded input buffer (~80 bytes, DESIGN.md §8) and argv slots per command. */
-#define CLI_LINE_MAX 80
+/* Bounded input buffer and argv slots per command. Sized to hold a `mount <drive>
+ * <url>` line: a tnfs:// Drive value is ≤128 chars (config.h/DESIGN.md §7), so the
+ * line must exceed that with room for the command + drive number (DESIGN.md §8). */
+#define CLI_LINE_MAX 200
 #define CLI_MAX_ARGS 8
 
 /* The prompt is built at runtime from wifiName + the dirty marker (config_prompt). */

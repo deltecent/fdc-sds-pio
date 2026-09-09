@@ -262,8 +262,11 @@ static int cmd_mount(cli_console_t *c, int argc, char **argv)
     if (argc < 2) {
         for (int i = 0; i < CONFIG_MAX_DRIVE; ++i) {
             if (disk_is_mounted(i)) {
-                cli_printf(c, "%d: %s (%lu bytes)\r\n", i, disk_name(i),
-                           (unsigned long)disk_image_size(i));
+                cli_printf(c, "%d: %s (%lu bytes)%s\r\n", i, disk_name(i),
+                           (unsigned long)disk_image_size(i),
+                           disk_is_readonly(i) ? " [read-only]" : "");
+            } else if (disk_is_remote(i)) {
+                cli_printf(c, "%d: %s (not ready)\r\n", i, disk_name(i));
             } else {
                 cli_printf(c, "%d: (empty)\r\n", i);
             }
@@ -271,13 +274,31 @@ static int cmd_mount(cli_console_t *c, int argc, char **argv)
         return 0;
     }
     if (argc < 3) {
-        cli_write(c, "usage: mount <drive> <file>\r\n");
+        cli_write(c, "usage: mount <drive> <file|tnfs://url>\r\n");
         return 1;
     }
 
     int drive = parse_drive(c, argv[1]);
     if (drive < 0) {
         return 1;
+    }
+
+    /* A tnfs:// target is a remote mount (§10.1): disk_mount configures the slot and, if
+     * WiFi is up, opens the session on the disk-I/O worker; if not, it stays deferred. */
+    if (tnfs_is_url(argv[2])) {
+        disk_mount(drive, argv[2]); /* configures the slot regardless of link state */
+        config_set_drive(drive, argv[2]); /* persist so it re-mounts on reconnect/reboot */
+        if (disk_is_mounted(drive)) {
+            cli_printf(c, "drive %d: %s (%lu bytes)%s\r\n", drive, argv[2],
+                       (unsigned long)disk_image_size(drive),
+                       disk_is_readonly(drive) ? " [read-only]" : "");
+        } else if (!net_is_connected()) {
+            cli_printf(c, "drive %d: %s (will mount when WiFi connects)\r\n", drive, argv[2]);
+        } else {
+            cli_printf(c, "drive %d: %s (not ready — server unreachable, will retry)\r\n",
+                       drive, argv[2]);
+        }
+        return 0;
     }
 
     esp_err_t err = disk_mount(drive, argv[2]);

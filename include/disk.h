@@ -44,10 +44,21 @@ esp_err_t disk_mount(int drive, const char *name);
 /* Unmount `drive` (closes its handle). No-op if the drive is not mounted. */
 esp_err_t disk_unmount(int drive);
 
-/* True if `drive` currently has an image mounted. */
+/* True if `drive` currently has an image mounted and ready to serve tracks. A remote
+ * (tnfs://) drive is "mounted" only while its session is live; it reads false while
+ * configured-but-not-ready (WiFi down / mount pending). */
 bool disk_is_mounted(int drive);
 
-/* Mounted image name for `drive` (empty string if none). Never NULL. */
+/* True if `drive` is configured as a remote (tnfs://) image, whether or not its
+ * session is currently up. Lets the CLI show a not-ready remote drive distinctly. */
+bool disk_is_remote(int drive);
+
+/* True if `drive` is mounted read-only (a remote image the server only allowed to be
+ * opened O_RDONLY); WRIT to it fails cleanly. Always false for local SD mounts. */
+bool disk_is_readonly(int drive);
+
+/* Mounted/configured image name for `drive`: the SD filename or the tnfs:// URL (kept
+ * for a not-ready remote drive so it can be re-mounted). Empty string if none. */
 const char *disk_name(int drive);
 
 /* Size in bytes of the image on `drive` (0 if not mounted). */
@@ -79,10 +90,26 @@ const uint8_t *disk_track_buffer(int *drive_out, uint32_t *track_out, size_t *le
 
 /*
  * Boot auto-mount (DESIGN.md §12 step 5): mount each drive whose config Drive<n> is a
- * plain SD filename. A `tnfs://` value is skipped here — remote mounts are deferred to
- * WiFi-up at M9 (DESIGN.md §10.1/§12 step 9). Missing images are logged, not fatal.
+ * plain SD filename. A `tnfs://` value is only *registered* here (the slot shows as a
+ * not-ready remote drive); the actual session is opened when WiFi connects via
+ * disk_remote_mount_all() (DESIGN.md §10.1/§12 step 9). Missing images are logged.
  */
 void disk_automount(void);
+
+/*
+ * WiFi-up hook (DESIGN.md §12 step 9): open a TNFS session for every configured remote
+ * drive that is not already mounted. Non-blocking — the sessions are established on the
+ * disk-I/O worker task (core 0, off the fdc path, §5.2/§10.1); each drive flips to ready
+ * as its mount completes. Safe to call again on every reconnect.
+ */
+void disk_remote_mount_all(void);
+
+/*
+ * WiFi-down hook (DESIGN.md §12 step 9): drop every remote drive to not-ready (close its
+ * session) while keeping it configured so disk_remote_mount_all() re-mounts it on
+ * reconnect. Non-blocking (serviced on the worker task). Local drives are untouched.
+ */
+void disk_remote_unmount_all(void);
 
 #ifdef __cplusplus
 }

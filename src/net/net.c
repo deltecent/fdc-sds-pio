@@ -25,6 +25,7 @@
 
 #include "net.h"
 #include "config.h"
+#include "disk.h"
 #include "ftp.h"
 
 static const char *TAG = "net";
@@ -82,6 +83,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         case WIFI_EVENT_STA_DISCONNECTED:
             xEventGroupClearBits(s_events, NET_CONNECTED_BIT);
             s_ip[0] = '\0';
+            /* Drop remote (tnfs://) drives to not-ready; they re-mount on GOT_IP
+             * (DESIGN.md §10.1/§12 step 9). */
+            disk_remote_unmount_all();
             if (s_wifi_started) {
                 esp_wifi_connect(); /* auto-reconnect (DESIGN.md §9.1) */
             }
@@ -98,6 +102,9 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         ESP_LOGI(TAG, "connected, IP %s", s_ip);
         xEventGroupSetBits(s_events, NET_CONNECTED_BIT);
         start_sntp();
+        /* Mount any deferred tnfs:// drives now that the link is up (§10.1/§12 step 9);
+         * also re-mounts them after a reconnect. */
+        disk_remote_mount_all();
     }
 }
 
