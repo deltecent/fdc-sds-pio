@@ -6,6 +6,13 @@
 # Run the CPU at full speed — high-baud FDC UART + inline SD track I/O.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
+# Flash size: the DEVKIT V1 is 4 MB and the partition table (partitions.csv) runs to
+# 0x3D0000, which does not fit in ESP-IDF's 2 MB default. Set 4 MB so the built
+# bootloader's flash-size header is correct on its own, rather than relying on the
+# PlatformIO uploader patching it at flash time (which left standalone/merged images
+# mislabeled as 2 MB).
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
 # Console on UART0 (USB) at 115200 8N1 (DESIGN.md §2.1).
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
