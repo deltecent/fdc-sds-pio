@@ -26,7 +26,7 @@ pio device monitor -b 115200   # serial console
 | Signal | ESP32 pin | Notes |
 |---|---|---|
 | FDC+ link | UART2 — RX GPIO16, TX GPIO17 | 3.3 V TTL; to the FDC+ serial port |
-| microSD | VSPI — CS 5, CLK 18, MISO 19, MOSI 23 | FAT-formatted; images live in the root |
+| microSD | VSPI — CS 5, CLK 18, MISO 19, MOSI 23 | FAT-formatted; disk sets in per-set folders (subdirectories supported) |
 | Status LED | GPIO2 | FDC activity |
 | Drive LEDs | GPIO27 / 14 / 12 / 13 | drives 0–3 |
 | Console | UART0 / USB @115200 | banner, CLI, flashing |

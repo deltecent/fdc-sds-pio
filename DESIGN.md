@@ -450,7 +450,7 @@ byte ever leaks into a command line.
   parser; lines starting with `#` are echoed as comments.
 - Unknown command ending in `.bat` (or with a matching `/<name>.bat`) is auto-run.
 - At startup, run `/autoexec.bat` if present.
-- Example (`SDCARD/8mb.bat`): `mount 0 CPM22-8MB-56K.DSK` … etc.
+- Example (`SDCARD/fdcp-8mb/8mb.bat`): `mount 0 CPM22-8MB-56K.DSK` … etc.
 - **A batch runs from its own folder (batch working directory).** `exec basic/setup.bat`
   finds and runs the file (§10), and **while it runs, bare names inside it resolve
   relative to the batch's own folder** — so a `setup.bat` in `basic/` that mounts an image
