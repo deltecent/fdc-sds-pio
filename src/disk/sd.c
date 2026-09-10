@@ -84,9 +84,30 @@ int sd_path(const char *name, char *buf, size_t len)
     if (!name || !*name) {
         return -1;
     }
-    /* Flat root for v1: no separators or parent refs (DESIGN.md §10). */
-    if (strchr(name, '/') || strchr(name, '\\')) {
+    /*
+     * Subdirectory paths are allowed under the SD root (DESIGN.md §10): '/' separates
+     * path components. We still refuse anything that could escape the root or confuse
+     * FATFS — a '\\' separator, a leading '/' (every name is root-relative), an empty
+     * component ("//" or a trailing '/'), and any ".." component (parent traversal).
+     */
+    if (strchr(name, '\\') || name[0] == '/') {
         return -1;
+    }
+    for (const char *p = name; *p; ) {
+        const char *seg = p;
+        while (*p && *p != '/') {
+            ++p;
+        }
+        size_t seglen = (size_t)(p - seg);
+        if (seglen == 0) {                                    /* empty component */
+            return -1;
+        }
+        if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {  /* parent traversal */
+            return -1;
+        }
+        if (*p == '/') {
+            ++p;                                              /* step over the separator */
+        }
     }
     int n = snprintf(buf, len, "%s/%s", SD_MOUNT_POINT, name);
     if (n < 0 || (size_t)n >= len) {

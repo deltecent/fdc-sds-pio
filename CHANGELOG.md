@@ -7,6 +7,29 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versioning starts fresh at 1.0.0 for this from-scratch ESP-IDF rewrite; the old Arduino
 firmware ended at 0.25.
 
+## [1.0.3] - 2026-09-10
+
+### Added
+
+- Subdirectory support on the SD card. File arguments to every command may now name a
+  path inside a folder (`mount 0 cpm/disk1.dsk`, `type docs/readme.txt`,
+  `copy a.dsk backup/a.dsk`), confined to the card root — a leading `/`, a `\` separator,
+  and any `..` parent reference are rejected. A `Drive<n>` mount may point into a subdir.
+- `mkdir` / `rmdir` commands (aliases `md` / `rd`) to create and remove directories;
+  `rmdir` requires the directory be empty and says so plainly when it is not.
+
+### Changed
+
+- `dir` lists and descends subdirectories: folders are shown with a trailing `/`,
+  `dir <subdir>` and `dir <subdir>/<glob>` list a folder, a `Directory of /…` header
+  names what is being listed, and entries are sorted (directories first, then
+  case-insensitive alphabetical).
+- `rename` / `mv` now moves a file between directories, not just renames in place, now
+  that paths accept subdirectories.
+- `exec` can run a batch file from a subdirectory (`exec basic/setup.bat`); commands
+  *inside* a batch still resolve their paths from the SD root, so batch paths are written
+  root-relative (documented — there is no working-directory model).
+
 ## [1.0.2] - 2026-09-10
 
 ### Added

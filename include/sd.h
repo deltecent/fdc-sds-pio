@@ -27,9 +27,11 @@ esp_err_t sd_mount(void);
 bool sd_mounted(void);
 
 /*
- * Resolve a user-supplied filename to an absolute path under the SD root, into
- * buf. Rejects paths containing '/' (v1 is flat-root, DESIGN.md §10). Returns the
- * path length, or -1 if the name is empty, too long, or contains a separator.
+ * Resolve a user-supplied name to an absolute path under the SD root, into buf.
+ * Subdirectory paths are allowed ('/' separates components, DESIGN.md §10) but the
+ * name stays confined to the root: a leading '/', a '\\' separator, an empty
+ * component, and any ".." component are rejected. Returns the path length, or -1 if
+ * the name is empty, too long, or fails one of those checks.
  */
 int sd_path(const char *name, char *buf, size_t len);
 

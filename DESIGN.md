@@ -451,6 +451,16 @@ byte ever leaks into a command line.
 - Unknown command ending in `.bat` (or with a matching `/<name>.bat`) is auto-run.
 - At startup, run `/autoexec.bat` if present.
 - Example (`SDCARD/8mb.bat`): `mount 0 CPM22-8MB-56K.DSK` … etc.
+- **The batch *file* may live in a subdirectory** — `exec basic/setup.bat` finds and
+  runs it (§10) — **but the *commands inside* always resolve relative to the SD root**,
+  not the batch file's folder. There is no working-directory / `cd` model (§10), so a
+  batch is dispatched exactly as if its lines were typed at the prompt, whose frame of
+  reference is always `/sd`. A path inside a batch must therefore be spelled root-
+  relative: a `setup.bat` in `basic/` that mounts an image alongside it writes
+  `mount 0 basic/setup.dsk`, not `mount 0 setup.dsk`. Consequence: a disk-set folder is
+  **not relocatable** by drag-and-drop — its batch paths encode the folder. (Making
+  bare names resolve against the batch's own directory would require the deferred
+  current-directory model; see §10.)
 
 ### 8.3 Timezones **[CLAUDE — resolved]**
 
@@ -631,17 +641,25 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
 - `SDCARD/` in this repo mirrors intended card contents: CP/M 2.2 (8 MB + standard),
   CP/M 3, Disk/Timeshare BASIC, AltairDOS, Lifeboat, Games, Zork, a blank 8 MB image,
   plus `.bat` mount scripts and PDFs. Print card type/size on init.
-- **[CLAUDE — resolved: keep v1 flat (root only), but don't hardcode "root"].**
-  The FAT/VFS layer already supports subdirectories, so the cost isn't the filesystem —
-  it's the UI/UX surface: `dir` would need to show and descend folders, `mount`/`type`/
-  `delete`/`rename`/`copy` would need path resolution and a notion of "current
-  directory," and batch/`autoexec` path handling would grow. For a card that holds a
-  few dozen disk images, a flat root is simpler and matches the FDC+ workflow.
-  **Recommendation for v1:** images live in SD **root** (as today). *But* write the
-  `disk`/CLI path handling to take a **full path string** rather than assuming root
-  (e.g. resolve args against a base dir constant), so adding `cd`/subdirectory browsing
-  later is additive, not a rewrite. Defer full directory navigation to the same
-  post-v1 phase as the web GUI.
+- **[CLAUDE — resolved: flat root through 1.0.2; subdirectory *paths* added post-1.0.2].**
+  The FAT/VFS layer always supported subdirectories, so the cost was never the
+  filesystem — it was the UI/UX surface. v1 shipped flat-root, but with the path handling
+  written to take a **full path string** (`sd_path()` resolves any arg against the SD
+  root) so this was additive, not a rewrite.
+  - **What's implemented.** `sd_path()` accepts subdirectory paths — `/` separates
+    components — while confining every name to the root: a leading `/`, a `\\` separator,
+    an empty component, and any `..` component are rejected (no traversal out of `/sd`).
+    Because every file command (`mount`/`type`/`delete`/`rename`/`copy`/`exec`, and OTA)
+    routes filenames through `sd_path()`, they all accept `dir/name.dsk` paths at once,
+    and a `Drive<n>` config value (§7) may hold a subdir path (it fits the 128-char cap).
+    `dir` shows subdirectories (trailing `/`) and lists a folder (`dir cpm`,
+    `dir cpm/*.DSK`). `mkdir`/`rmdir` (aliases `md`/`rd`) create and remove directories;
+    `rmdir` requires the directory be empty. FTP already navigated subdirectories
+    (`CWD`/`MKD`/`RMD`) independently of the CLI.
+  - **Still deferred.** There is **no working-directory / `cd` model**: names are always
+    resolved relative to the SD root, not a per-session current directory. Full
+    `cd`-style navigation stays in the post-v1 / web-GUI phase; it would add per-console
+    session state and relative-path resolution on top of what's here.
 
 ### 10.1 Remote images over TNFS **[RESOLVED: in scope for v1]**
 
