@@ -778,9 +778,14 @@ front end plus the version-marker check.
 
 ## 13. Statistics & Diagnostics
 
-In-RAM counters: `stat`, `read`, `writ`, `errs` (checksum), `tout` (timeouts); plus
-formatted "last STAT/READ/WRIT/error" strings. `dump` hex-dumps the track buffer.
-`clear` resets. Not persisted.
+In-RAM counters, split by the point in the transaction where a fault is observed (the
+server is a passive responder, so it only sees corruption in bytes the FDC sends *to*
+it): `stat`, `read`, `writ`, `read_retry` (FDC re-read the same drive/track — the only
+signal of a READ the FDC rejected, since it sends no error packet), `not_ready`,
+`cmd_csum` (bad command-header checksum), `data_csum` (bad WRIT track-data checksum →
+`WSTA 2`), `cmd_timeout` (command header truncated), `data_timeout` (WRIT track data /
+its checksum incomplete), `unknown`; plus a formatted "last op" string. `dump`
+hex-dumps the track buffer. `clear` resets. Not persisted.
 
 **Console log verbosity.** IDF's `ESP_LOG` output (WiFi/net/fdc/sd/ftp INFO, etc.) is
 gated by a runtime level so the console is quiet in normal use and verbose only on

@@ -846,9 +846,16 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "  STAT     %lu\r\n", (unsigned long)s.stat);
     cli_printf(c, "  READ     %lu\r\n", (unsigned long)s.read);
     cli_printf(c, "  WRIT     %lu\r\n", (unsigned long)s.writ);
+    cli_printf(c, "  rd-retry %lu\r\n", (unsigned long)s.read_retry);
     cli_printf(c, "  not-rdy  %lu\r\n", (unsigned long)s.not_ready);
-    cli_printf(c, "  csum-err %lu\r\n", (unsigned long)s.csum_err);
-    cli_printf(c, "  timeout  %lu\r\n", (unsigned long)s.timeouts);
+    cli_printf(c, "  cmd-csum %lu  (bad command header from FDC)\r\n",
+               (unsigned long)s.cmd_csum);
+    cli_printf(c, "  data-csum %lu (bad WRIT track data from FDC)\r\n",
+               (unsigned long)s.data_csum);
+    cli_printf(c, "  cmd-tmo  %lu  (command header truncated)\r\n",
+               (unsigned long)s.cmd_timeout);
+    cli_printf(c, "  data-tmo %lu  (WRIT track data incomplete)\r\n",
+               (unsigned long)s.data_timeout);
     cli_printf(c, "  unknown  %lu\r\n", (unsigned long)s.unknown);
     cli_printf(c, "  last     %s\r\n", s.last_op[0] ? s.last_op : "(none)");
     return 0;
@@ -1422,11 +1429,13 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
     fdc_stats_t s;
     fdc_get_stats(&s);
     cli_printf(c, "Link:      %lu baud\r\n", (unsigned long)fdc_baud());
-    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  not-rdy %lu  csum-err %lu  "
-                  "timeout %lu  unknown %lu\r\n",
+    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  rd-retry %lu  not-rdy %lu  unknown %lu\r\n",
                (unsigned long)s.stat, (unsigned long)s.read, (unsigned long)s.writ,
-               (unsigned long)s.not_ready, (unsigned long)s.csum_err,
-               (unsigned long)s.timeouts, (unsigned long)s.unknown);
+               (unsigned long)s.read_retry, (unsigned long)s.not_ready,
+               (unsigned long)s.unknown);
+    cli_printf(c, "cmd-csum %lu  data-csum %lu  cmd-tmo %lu  data-tmo %lu\r\n",
+               (unsigned long)s.cmd_csum, (unsigned long)s.data_csum,
+               (unsigned long)s.cmd_timeout, (unsigned long)s.data_timeout);
     cli_printf(c, "Last op:   %s\r\n", s.last_op[0] ? s.last_op : "(none)");
 
     cli_write(c, "==== end diagnostics ====\r\n");

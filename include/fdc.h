@@ -21,15 +21,26 @@
 extern "C" {
 #endif
 
-/* Running counters + last-transaction string, shown by the `stats` command. */
+/*
+ * Running counters + last-transaction string, shown by the `stats` command.
+ *
+ * The server is a passive responder: it can only observe corruption in bytes the FDC
+ * sends *to* it, so the checksum/timeout counters name where in the transaction the
+ * fault occurred (DESIGN.md §6.4). A READ whose data the FDC rejects (bad CRC on its
+ * side) produces no error packet here — the FDC silently re-reads — so `read_retry`
+ * (a repeated READ of the same drive/track) is the only visibility into that case.
+ */
 typedef struct {
-    uint32_t stat;      /* STAT commands answered */
-    uint32_t read;      /* READ commands that returned track data */
-    uint32_t writ;      /* WRIT commands accepted (data received, WSTA sent) */
-    uint32_t not_ready; /* READ/WRIT to an unmounted / out-of-range drive */
-    uint32_t csum_err;  /* bad command-block or write-data checksums */
-    uint32_t timeouts;  /* incomplete command / data blocks (RX flushed) */
-    uint32_t unknown;   /* unrecognized 4-byte command mnemonics */
+    uint32_t stat;         /* STAT commands answered */
+    uint32_t read;         /* READ commands that returned track data */
+    uint32_t writ;         /* WRIT commands accepted (data received, WSTA sent) */
+    uint32_t not_ready;    /* READ/WRIT to an unmounted / out-of-range drive, or write error */
+    uint32_t cmd_csum;     /* bad checksum on a 10-byte command block (header from FDC) */
+    uint32_t data_csum;    /* bad checksum on WRIT track data (payload from FDC) -> WSTA 2 */
+    uint32_t cmd_timeout;  /* command block truncated before the 10 bytes arrived */
+    uint32_t data_timeout; /* WRIT track data / its checksum did not fully arrive */
+    uint32_t read_retry;   /* READ repeating the previous drive/track (FDC re-reading) */
+    uint32_t unknown;      /* unrecognized 4-byte command mnemonics */
     char     last_op[40];
 } fdc_stats_t;
 

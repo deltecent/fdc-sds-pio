@@ -213,6 +213,10 @@ static void handle_stat(void)
     set_last_op("STAT sel=%u map=0x%04x", sel, bitmap);
 }
 
+/* Last drive/track a READ served, to flag the FDC re-reading the same track (§6.4). */
+static int      s_last_read_drive = -1;
+static uint16_t s_last_read_track;
+
 static void handle_read(void)
 {
     uint16_t word1 = fdc_read_le16(&s_cmd[FDC_OFF_WORD1]);
@@ -221,6 +225,17 @@ static void handle_read(void)
     uint16_t track = fdc_word1_track(word1);
 
     led_drive_select(drive);
+
+    /* A READ repeating the previous one means the FDC rejected our last response
+     * (bad CRC on its side, or a timeout) and is re-reading — the only signal the
+     * passive server has for a failed READ, since the FDC sends no error packet. */
+    if (drive == s_last_read_drive && track == s_last_read_track) {
+        stat_lock();
+        s_stats.read_retry++;
+        stat_unlock();
+    }
+    s_last_read_drive = drive;
+    s_last_read_track = track;
 
     esp_err_t err = disk_read_track(drive, track, len);
     if (err != ESP_OK) {
@@ -277,7 +292,7 @@ static void handle_writ(void)
     if (recv(s_data, len, FDC_DATA_TIMEOUT_MS) != len) {
         uart_flush_input(s_port);
         stat_lock();
-        s_stats.timeouts++;
+        s_stats.data_timeout++;
         stat_unlock();
         set_last_op("WRIT d%d t%u len%u data-timeout", drive, track, len);
         return;
@@ -286,7 +301,7 @@ static void handle_writ(void)
     if (recv(ck, sizeof ck, FDC_CMD_TIMEOUT_MS) != sizeof ck) {
         uart_flush_input(s_port);
         stat_lock();
-        s_stats.timeouts++;
+        s_stats.data_timeout++;
         stat_unlock();
         set_last_op("WRIT d%d t%u len%u csum-timeout", drive, track, len);
         return;
@@ -296,7 +311,7 @@ static void handle_writ(void)
     if (fdc_read_le16(ck) != fdc_checksum16(s_data, len)) {
         code = FDC_RESP_CSUM_ERR; /* bad write data -> code 2, not silent (§6.4) */
         stat_lock();
-        s_stats.csum_err++;
+        s_stats.data_csum++;
         stat_unlock();
         set_last_op("WRIT d%d t%u len%u csum-err", drive, track, len);
     } else if (disk_write_track(drive, track, len, s_data) != ESP_OK) {
@@ -428,7 +443,7 @@ static void fdc_task(void *arg)
         if (recv(&s_cmd[1], FDC_BLOCK_LEN - 1, FDC_CMD_TIMEOUT_MS) != FDC_BLOCK_LEN - 1) {
             uart_flush_input(s_port);
             stat_lock();
-            s_stats.timeouts++;
+            s_stats.cmd_timeout++;
             stat_unlock();
             continue;
         }
@@ -436,7 +451,7 @@ static void fdc_task(void *arg)
         /* Ignore a bad command checksum (the FDC will retry), §6.4. */
         if (!fdc_block_valid(s_cmd)) {
             stat_lock();
-            s_stats.csum_err++;
+            s_stats.cmd_csum++;
             stat_unlock();
             continue;
         }
