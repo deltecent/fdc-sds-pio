@@ -44,6 +44,9 @@ static const char *TAG = "fdc";
 #define FDC_IDLE_POLL_MS      200
 /* Status LED: lit on a valid command, auto-off after this (DESIGN.md §6.7). */
 #define FDC_STATUS_LED_MS      75
+/* Drive LEDs: cleared if no command arrives from the FDC for this long, so a lit
+ * drive LED doesn't stick on after the FDC powers off / disconnects (DESIGN.md §6.7). */
+#define FDC_DRIVE_LED_IDLE_MS  5000
 /* Loopback pattern length (DESIGN.md §6.8). */
 #define FDC_LOOPBACK_LEN      256
 
@@ -67,7 +70,8 @@ static const gpio_num_t s_drive_leds[DISK_MAX_DRIVE] = {
 };
 
 static TaskHandle_t       s_task;
-static esp_timer_handle_t s_led_timer;
+static esp_timer_handle_t s_led_timer;        /* status LED one-shot (auto-off) */
+static esp_timer_handle_t s_drive_led_timer;  /* drive LEDs idle-off one-shot */
 
 /* UART hardware event queue (FIFO overflow, framing errors), drained by the task. */
 static QueueHandle_t      s_uart_evt_q;
@@ -120,6 +124,21 @@ static void led_drive_clear(void)
     for (int i = 0; i < DISK_MAX_DRIVE; ++i) {
         gpio_set_level(s_drive_leds[i], 0);
     }
+}
+
+/* Fires when the FDC has been silent for FDC_DRIVE_LED_IDLE_MS: drop the drive LEDs
+ * so one left lit (e.g. head loaded) doesn't stick on after the FDC disconnects. */
+static void drive_led_timer_cb(void *arg)
+{
+    (void)arg;
+    led_drive_clear();
+}
+
+/* Re-arm the drive-LED idle timeout; called on every command received (DESIGN.md §6.7). */
+static void led_drive_activity(void)
+{
+    esp_timer_stop(s_drive_led_timer); /* harmless if not running */
+    esp_timer_start_once(s_drive_led_timer, (uint64_t)FDC_DRIVE_LED_IDLE_MS * 1000);
 }
 
 /* ---- stats ----------------------------------------------------------------- */
@@ -202,10 +221,12 @@ static void handle_stat(void)
     uint8_t  sel   = (uint8_t)(word1 & 0xFF);   /* selected drive, 0xff = none */
     uint8_t  head  = (uint8_t)(word1 >> 8);     /* nonzero = head loaded */
 
-    /* Reflect the selected drive on the LEDs while the head is loaded (§6.7). */
+    /* Reflect the selected drive on the LEDs while the head is loaded (§6.7).
+     * Head unloaded (or no drive selected) clears the LEDs, regardless of the
+     * drive number the FDC still reports in `sel`. */
     if (head && sel < DISK_MAX_DRIVE) {
         led_drive_select(sel);
-    } else if (sel == 0xFF) {
+    } else {
         led_drive_clear();
     }
 
@@ -341,6 +362,7 @@ static void handle_writ(void)
 static void dispatch(void)
 {
     led_status_blip();
+    led_drive_activity();
     if (memcmp(s_cmd, "STAT", FDC_CMD_LEN) == 0) {
         handle_stat();
     } else if (memcmp(s_cmd, "READ", FDC_CMD_LEN) == 0) {
@@ -562,6 +584,12 @@ esp_err_t fdc_init(void)
         .name = "fdc-led",
     };
     ESP_ERROR_CHECK(esp_timer_create(&targs, &s_led_timer));
+
+    const esp_timer_create_args_t dargs = {
+        .callback = drive_led_timer_cb,
+        .name = "fdc-drive-led",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&dargs, &s_drive_led_timer));
 
     /* UART2 is installed by the task itself (fdc_uart_start) so its RX interrupt lands
      * on core 1, off the WiFi/lwIP core (DESIGN.md §5.2/§6.1). */
