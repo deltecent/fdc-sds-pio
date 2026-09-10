@@ -46,7 +46,7 @@ static const char *TAG = "fdc";
 #define FDC_STATUS_LED_MS      75
 /* Drive LEDs: cleared if no command arrives from the FDC for this long, so a lit
  * drive LED doesn't stick on after the FDC powers off / disconnects (DESIGN.md §6.7). */
-#define FDC_DRIVE_LED_IDLE_MS  5000
+#define FDC_DRIVE_LED_IDLE_MS  3000
 /* Loopback pattern length (DESIGN.md §6.8). */
 #define FDC_LOOPBACK_LEN      256
 

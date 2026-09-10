@@ -319,7 +319,7 @@ The **8192-byte** track of the 8 MB format sets the **minimum track-buffer size*
   timeout (~75 ms) turns it off, so it reflects live activity.
 - Drive LEDs: set the selected drive on STAT (when head loaded); head unloaded (or no
   drive selected) clears them. Because CP/M and FLEX serial drivers don't send STAT,
-  READ/WRIT should also drive the LEDs (clear all, set the accessed drive). A ~5 s idle
+  READ/WRIT should also drive the LEDs (clear all, set the accessed drive). A ~3 s idle
   timer clears the drive LEDs if no command arrives from the FDC, so a lit LED doesn't
   stick on after the FDC powers off or disconnects.
 
