@@ -417,7 +417,7 @@ byte ever leaks into a command line.
 | `logout` / `exit` | — | Disconnect Telnet client |
 | `delete` / `rm` | file | Delete a file |
 | `rename` / `mv` | old new | Rename a file |
-| `copy` / `cp` | src dst | Copy a file (chunked I/O, §5.2); `src`/`dst` may be an SD name **or** a `tnfs://` URL (§10.1) |
+| `copy` / `cp` | src dst | Copy a file (chunked I/O, §5.2); `src`/`dst` may be an SD name or a `tnfs://` URL, and `src` may also be an `http(s)://` URL (§10.1–10.3) |
 | `loopback` / `lb` | — | FDC+ serial loopback test |
 | `time` / `date` | — | Show current (UTC) time |
 | `tz` | timezone | Set/show timezone; `help tz` lists the US zones in §8.3 |
@@ -435,11 +435,13 @@ byte ever leaks into a command line.
   the `update local`/`update ota` arguments (bare `update` reports version status; a bare
   `update <url>` also works but is undocumented, §11.1), an optional glob `spec` on
   `dir`/`ls` (§8.4), a
-  `tnfs://` URL as a `mount` target, and `tnfs://` endpoints on `copy` (§10.1).
+  `tnfs://` URL as a `mount` target, `tnfs://` endpoints on `copy` (§10.1), and an
+  `http(s)://` `copy` **source** (§10.3).
 - Wildcards apply only to `dir`/`ls`; other file commands take one explicit name in v1
   (no glob-delete/-copy). `type`/`delete`/`rename` operate on SD only; `copy` accepts
-  `tnfs://` endpoints (§10.1), and `dir`/`ls` accepts a `tnfs://` **directory** URL to
-  list a remote server (§8.4). No other command takes a `tnfs://` arg in v1.
+  `tnfs://` endpoints (§10.1) and an `http(s)://` **source** (§10.3), and `dir`/`ls`
+  accepts a `tnfs://` **directory** URL to list a remote server (§8.4). No other command
+  takes a `tnfs://` or `http(s)://` arg in v1.
 
 ### 8.2 Batch files & AUTOEXEC
 - `exec <name>` reads `<name>` (or `<name>.bat`) from SD and feeds each line to the
@@ -707,6 +709,36 @@ as with a failed local copy — noted, not cleaned in v1).
   high-latency link; a LAN `tnfsd` is far faster. It does **not** affect mounted-drive
   track I/O, which fetches only the requested track (§10.1) and is warmed by the cache.
 
+### 10.3 HTTP(S) copy source **[RESOLVED: in scope for v1]**
+
+`copy` also accepts an `http://` or `https://` URL as its **source** (never its
+destination), so an image can be pulled straight from a web server — no FTP client and no
+separate download-then-upload step:
+
+- `copy https://host/path/CPM22.DSK CPM22.DSK` — pull a web image to SD root.
+- `copy https://host/path/CPM22.DSK tnfs://host/CPM22.DSK` — pull straight onto a TNFS
+  server (SD not touched).
+
+Rules:
+
+- **Source only.** HTTP has no portable write verb, so an `http(s)://` endpoint is
+  rejected as a `copy` *destination* and is not accepted by `mount`, `dir`, or any other
+  command. Push targets stay SD or `tnfs://` (§10.2).
+- **Forward stream, not random access.** Unlike a `tnfs://` source (STAT size + seek by
+  offset, §10.1), a GET is a one-way body: the transfer streams to EOF in bounded chunks,
+  so the reported `copied <n> bytes` is whatever the server sent. `Content-Length` may be
+  absent (chunked / compressed transfer encodings) and is **not** required.
+- **Same chunking discipline** as §10.2 / §5.2: each chunk is read then written before the
+  next, releasing the SD side between chunks, so a long download never breaches the FDC
+  ~1 s timeout. The transfer runs inline on the 8 KB CLI task — the same stack OTA uses
+  for mbedTLS (§11) — so no dedicated worker is needed.
+- **TLS + redirects.** `https://` verifies against the bundled CA roots
+  (`esp_crt_bundle`, nothing host-pinned) — the same trust store as OTA (§11). Redirects
+  are followed automatically; a non-2xx final status fails the copy cleanly (leaving, as
+  with any failed copy, a possible partial SD file — not cleaned in v1).
+- Uses a **transient** HTTP client (connect → stream → close), independent of any mounted
+  drive, reusing the `esp_http_client` transport already linked for OTA (§11).
+
 ---
 
 ## 11. Firmware Update (OTA)
@@ -854,3 +886,5 @@ All resolved:
 - ~~Remote disk images (TNFS)~~ — **RESOLVED: mount from & `copy` to/from `tnfs://` in
   scope for v1** (§9.5 / §10.1 / §10.2). Remaining open risk is remote-read latency vs
   the FDC ~1 s timeout (§10.1), to validate on hardware.
+- ~~HTTP(S) copy source~~ — **RESOLVED: `copy` accepts an `http(s)://` URL as a
+  read-only source (§10.3), in scope for v1.**

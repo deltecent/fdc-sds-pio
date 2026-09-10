@@ -36,6 +36,7 @@
 #include "config.h"
 #include "disk.h"
 #include "fdc.h"
+#include "http.h"
 #include "net.h"
 #include "ota.h"
 #include "sd.h"
@@ -177,11 +178,13 @@ static const char D_rename[] =
     "usage: rename <old-name> <new-name>\r\n";
 static const char D_copy[] =
     "Each of <src> and <dst> may be an SD-card file or a tnfs:// URL, so this\r\n"
-    "also transfers files to or from a TNFS server.\r\n"
+    "also transfers files to or from a TNFS server. <src> may also be an\r\n"
+    "http:// or https:// URL to pull a file from a web server (source only).\r\n"
     "usage: copy <src> <dst>\r\n"
     "examples:\r\n"
     "  copy CPM22.DSK BACKUP.DSK\r\n"
-    "  copy tnfs://192.168.1.10/disks/GAMES.DSK GAMES.DSK\r\n";
+    "  copy tnfs://192.168.1.10/disks/GAMES.DSK GAMES.DSK\r\n"
+    "  copy https://example.com/disks/CPM22.DSK CPM22.DSK\r\n";
 static const char D_loopback[] =
     "Sends a 256-byte pattern out the FDC+ serial port and checks it comes back.\r\n"
     "Jumper the FDC+ TX and RX pins together first.\r\n"
@@ -218,7 +221,7 @@ static const cli_command_t k_commands[] = {
     { "logout",   "exit",   "Disconnect this network session",     cmd_logout, NULL       },
     { "delete",   "rm",     "Delete a file from SD",               cmd_delete, D_delete   },
     { "rename",   "mv",     "Rename a file on SD",                 cmd_rename, D_rename   },
-    { "copy",     "cp",     "Copy a file (SD or TNFS)",            cmd_copy,   D_copy     },
+    { "copy",     "cp",     "Copy a file (SD/TNFS, or HTTP src)",  cmd_copy,   D_copy     },
     { "loopback", "lb",     "Run the FDC+ serial loopback test",   cmd_loopback, D_loopback },
     { "time",     "date",   "Show the current date and time",      cmd_time,   NULL       },
     { "tz",       NULL,     "Show or set the timezone",            cmd_tz,     D_tz       },
@@ -642,13 +645,72 @@ static int cmd_rename(cli_console_t *c, int argc, char **argv)
 }
 
 /*
- * copy <src> <dst> — stream a whole file between the SD root and/or a TNFS server
- * (DESIGN.md §10.2). Either endpoint may be a tnfs://host/path URL; an endpoint
- * without that prefix is an SD-root filename. All four combinations work (SD↔SD,
- * pull, push, remote↔remote). Streaming is chunked so neither the SD nor the FDC
- * path is starved (§5.2): each iteration is a bounded read + write, holding no lock
- * across the transfer. A remote source is bounded by its STAT size; a local source
- * runs to EOF.
+ * Open the copy destination named by `name` — a tnfs:// URL (create+truncate on the
+ * server) when `remote`, otherwise an SD-root file opened "wb". Fills exactly one of
+ * *sf / *rf on success (the other is NULL) and returns true; prints a diagnostic and
+ * returns false on failure. Shared by every source path in cmd_copy (§10.2/§10.3).
+ */
+static bool copy_open_dest(cli_console_t *c, const char *name, bool remote,
+                           FILE **sf, tnfs_file_t **rf)
+{
+    *sf = NULL;
+    *rf = NULL;
+    if (remote) {
+        esp_err_t err = tnfs_open(name, true, true, rf);
+        if (err != ESP_OK) {
+            cli_printf(c, "%s: %s\r\n", name,
+                       err == ESP_ERR_TIMEOUT ? "server unreachable" : "create failed");
+            return false;
+        }
+        return true;
+    }
+    char path[16 + CONFIG_FILE_CAP];
+    if (!resolve(c, name, path, sizeof path)) {
+        return false;
+    }
+    *sf = fopen(path, "wb");
+    if (!*sf) {
+        cli_printf(c, "%s: %s\r\n", name, strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+/* Destination state for an http(s):// source pull (§10.3): the open destination (SD or
+ * TNFS), the running write offset, and the message for the first write failure. */
+typedef struct {
+    FILE        *sf;
+    tnfs_file_t *rf;
+    uint32_t     off;
+    const char  *err;
+} copy_sink_t;
+
+/* http_sink_fn: write one streamed body chunk to the copy destination. Returns 0 to
+ * continue or -1 to abort (recording which side failed). */
+static int copy_sink_write(void *ctx, const void *data, size_t len)
+{
+    copy_sink_t *s = (copy_sink_t *)ctx;
+    if (s->rf) {
+        if (tnfs_write_at(s->rf, s->off, data, len) != ESP_OK) {
+            s->err = "copy: remote write error\r\n";
+            return -1;
+        }
+    } else if (fwrite(data, 1, len, s->sf) != len) {
+        s->err = "copy: write error\r\n";
+        return -1;
+    }
+    s->off += (uint32_t)len;
+    return 0;
+}
+
+/*
+ * copy <src> <dst> — stream a whole file between the SD root, a TNFS server, and/or a
+ * web server (DESIGN.md §10.2/§10.3). <src> or <dst> may be a tnfs://host/path URL; <src>
+ * may additionally be an http(s):// URL (source only — HTTP has no upload verb). An
+ * endpoint without a scheme is an SD-root filename. Streaming is chunked so neither the
+ * SD nor the FDC path is starved (§5.2): each iteration is a bounded read + write,
+ * holding no lock across the transfer. A tnfs:// source is bounded by its STAT size; a
+ * local or http(s):// source runs to EOF.
  */
 static int cmd_copy(cli_console_t *c, int argc, char **argv)
 {
@@ -656,14 +718,53 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
         cli_write(c, "usage: copy <src> <dst>\r\n");
         return 1;
     }
+    bool src_http   = http_is_url(argv[1]);
     bool src_remote = tnfs_is_url(argv[1]);
     bool dst_remote = tnfs_is_url(argv[2]);
-    if ((src_remote || dst_remote) && !net_is_connected()) {
+    if (http_is_url(argv[2])) {
+        cli_write(c, "copy: http(s):// is a source only, not a destination\r\n");
+        return 1;
+    }
+    if ((src_http || src_remote || dst_remote) && !net_is_connected()) {
         cli_write(c, "copy: WiFi not connected\r\n");
         return 1;
     }
 
-    /* Open source. */
+    /* http(s):// source (§10.3): a forward-only GET streamed straight into the
+     * destination, so the destination is opened first and the transfer runs to EOF. */
+    if (src_http) {
+        FILE *sout = NULL;
+        tnfs_file_t *rout = NULL;
+        if (!copy_open_dest(c, argv[2], dst_remote, &sout, &rout)) {
+            return 1;
+        }
+        copy_sink_t sink = { .sf = sout, .rf = rout, .off = 0, .err = NULL };
+        uint32_t got = 0;
+        esp_err_t err = http_get(argv[1], copy_sink_write, &sink, &got);
+
+        bool ok = (err == ESP_OK);
+        const char *msg = NULL;
+        if (!ok) {
+            msg = sink.err ? sink.err
+                : err == ESP_ERR_INVALID_RESPONSE ? "copy: HTTP request failed\r\n"
+                : err == ESP_ERR_TIMEOUT          ? "copy: server unreachable\r\n"
+                                                  : "copy: fetch failed\r\n";
+        }
+        if (rout) {
+            tnfs_close(rout);
+        } else if (fclose(sout) != 0 && ok) {
+            ok = false;
+            msg = "copy: close error\r\n";
+        }
+        if (!ok) {
+            cli_write(c, msg);
+            return 1;
+        }
+        cli_printf(c, "copied %lu bytes\r\n", (unsigned long)got);
+        return 0;
+    }
+
+    /* Open source (SD file or tnfs:// URL). */
     FILE *sin = NULL;
     tnfs_file_t *rin = NULL;
     uint32_t total = 0;
@@ -691,26 +792,9 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
     /* Open destination (create+truncate for a remote push). */
     FILE *sout = NULL;
     tnfs_file_t *rout = NULL;
-    if (dst_remote) {
-        esp_err_t err = tnfs_open(argv[2], true, true, &rout);
-        if (err != ESP_OK) {
-            cli_printf(c, "%s: %s\r\n", argv[2],
-                       err == ESP_ERR_TIMEOUT ? "server unreachable" : "create failed");
-            if (rin) { tnfs_close(rin); } else { fclose(sin); }
-            return 1;
-        }
-    } else {
-        char path[16 + CONFIG_FILE_CAP];
-        if (!resolve(c, argv[2], path, sizeof path)) {
-            if (rin) { tnfs_close(rin); } else { fclose(sin); }
-            return 1;
-        }
-        sout = fopen(path, "wb");
-        if (!sout) {
-            cli_printf(c, "%s: %s\r\n", argv[2], strerror(errno));
-            if (rin) { tnfs_close(rin); } else { fclose(sin); }
-            return 1;
-        }
+    if (!copy_open_dest(c, argv[2], dst_remote, &sout, &rout)) {
+        if (rin) { tnfs_close(rin); } else { fclose(sin); }
+        return 1;
     }
 
     uint8_t buf[512];

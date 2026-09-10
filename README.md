@@ -58,7 +58,7 @@ The prompt is the host name; a leading `* ` means the config has unsaved edits.
 | `version` | Firmware version |
 | `dir` / `ls` `[glob]` | List SD files (e.g. `dir *.dsk`) |
 | `type` / `cat` `<file>` | Print a text file |
-| `copy` / `cp` `<src> <dst>` | Copy a file |
+| `copy` / `cp` `<src> <dst>` | Copy a file; each endpoint may be an SD name or a `tnfs://` URL, and `<src>` may also be an `http(s)://` URL |
 | `rename` / `mv` `<old> <new>` | Rename a file |
 | `delete` / `rm` `<file>` | Delete a file |
 | `mount` `[<drive> <file>]` | Show the mount table, or mount an image |
@@ -116,6 +116,17 @@ and starts the Telnet console (:23) and an FTP server (default login `fdc` / `fd
 changeable with `ftpuser` / `ftppass`). Upload `.dsk` images straight to the SD card
 over FTP.
 
+Once WiFi is up, `copy` can also stage images without a separate client:
+
+```
+copy tnfs://192.168.1.10/disks/GAMES.DSK GAMES.DSK        # pull from a TNFS server
+copy https://example.com/disks/CPM22.DSK CPM22.DSK        # pull from a web server
+```
+
+A `tnfs://` endpoint works as either the source or the destination; an `http(s)://` URL
+is a source only (HTTP has no upload path), and `https://` is verified against the
+bundled CA roots.
+
 ## Firmware update (OTA)
 
 - `update` — report the running version, any `/firmware.bin` staged on the SD card, and
@@ -128,5 +139,6 @@ over FTP.
 The device carries two app slots (dual-OTA partition table), so a failed or interrupted
 update leaves the running firmware intact.
 
-> Built from `DESIGN.md`. Milestones M0–M8 are implemented; remote disk images over
-> TNFS (mount/copy) are the remaining M9 work.
+> Built from `DESIGN.md`. The core server (M0–M8) is implemented, along with remote disk
+> images over TNFS (mount + `copy`) and `http(s)://` `copy` sources; on-hardware
+> validation of remote-read timing against the FDC ~1 s timeout is ongoing.
