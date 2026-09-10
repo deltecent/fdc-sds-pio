@@ -17,6 +17,9 @@ pio device monitor -b 115200   # serial console
 - Board: DOIT ESP32 DEVKIT V1 (4 MB flash).
 - Reference disk images and batch files live in `SDCARD/` (copy them to a FAT microSD).
 - Protocol & hardware reference: <https://deramp.com/downloads/altair/hardware/fdc+/>
+- Prebuilt binaries (no toolchain needed): **[Releases](https://github.com/deltecent/fdc-sds-pio/releases/latest)**
+  — each tag attaches `merged.bin` (full flash, offset `0x0`) and `firmware.bin` (app / OTA
+  image). Current release: **[1.0.2](https://github.com/deltecent/fdc-sds-pio/releases/tag/1.0.2)**.
 
 ## Hardware
 
