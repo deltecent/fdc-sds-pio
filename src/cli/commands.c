@@ -681,8 +681,7 @@ static int cmd_unmount(cli_console_t *c, int argc, char **argv)
         return 1;
     }
     if (!disk_is_mounted(drive)) {
-        cli_printf(c, "drive %d not mounted\r\n", drive);
-        return 1;
+        return 0; /* already unmounted: stay quiet (§8.2 batch-friendly) */
     }
     disk_unmount(drive);
     config_set_drive(drive, NULL);
@@ -906,13 +905,23 @@ static bool copy_open_dest(cli_console_t *c, const char *name, bool remote,
     return true;
 }
 
+/* Show a running "copied N bytes" line, refreshed in place with a bare '\r' (no line
+ * feed), at most once per this many bytes so a large transfer doesn't flood the console.
+ * The byte count only grows and the final line reuses the same format, so each refresh is
+ * at least as wide as the last — no stale tail is left behind, and the final line (ending
+ * in "\r\n") simply overwrites the last progress line before the prompt returns. */
+#define COPY_PROGRESS_STEP (20 * 1024)
+
 /* Destination state for an http(s):// source pull (§10.3): the open destination (SD or
- * TNFS), the running write offset, and the message for the first write failure. */
+ * TNFS), the running write offset, and the message for the first write failure. `c` is the
+ * console for progress (NULL disables it) and `reported` is the offset last printed. */
 typedef struct {
-    FILE        *sf;
-    tnfs_file_t *rf;
-    uint32_t     off;
-    const char  *err;
+    FILE          *sf;
+    tnfs_file_t   *rf;
+    uint32_t       off;
+    const char    *err;
+    cli_console_t *c;
+    uint32_t       reported;
 } copy_sink_t;
 
 /* http_sink_fn: write one streamed body chunk to the copy destination. Returns 0 to
@@ -930,6 +939,10 @@ static int copy_sink_write(void *ctx, const void *data, size_t len)
         return -1;
     }
     s->off += (uint32_t)len;
+    if (s->c && s->off - s->reported >= COPY_PROGRESS_STEP) {
+        cli_printf(s->c, "\rcopied %lu bytes", (unsigned long)s->off);
+        s->reported = s->off;
+    }
     return 0;
 }
 
@@ -968,7 +981,8 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
         if (!copy_open_dest(c, argv[2], dst_remote, &sout, &rout)) {
             return 1;
         }
-        copy_sink_t sink = { .sf = sout, .rf = rout, .off = 0, .err = NULL };
+        copy_sink_t sink = { .sf = sout, .rf = rout, .off = 0, .err = NULL,
+                             .c = c, .reported = 0 };
         uint32_t got = 0;
         esp_err_t err = http_get(argv[1], copy_sink_write, &sink, &got);
 
@@ -990,7 +1004,7 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
             cli_write(c, msg);
             return 1;
         }
-        cli_printf(c, "copied %lu bytes\r\n", (unsigned long)got);
+        cli_printf(c, "\rcopied %lu bytes\r\n", (unsigned long)got);
         return 0;
     }
 
@@ -1029,6 +1043,7 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
 
     uint8_t buf[512];
     uint32_t off = 0;
+    uint32_t reported = 0;
     bool ok = true;
     const char *msg = NULL;
     for (;;) {
@@ -1060,6 +1075,10 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
             ok = false; msg = "copy: write error\r\n"; break;
         }
         off += (uint32_t)n;
+        if (off - reported >= COPY_PROGRESS_STEP) {
+            cli_printf(c, "\rcopied %lu bytes", (unsigned long)off);
+            reported = off;
+        }
     }
 
     if (rin) { tnfs_close(rin); } else { fclose(sin); }
@@ -1073,7 +1092,7 @@ static int cmd_copy(cli_console_t *c, int argc, char **argv)
         cli_write(c, msg ? msg : "copy: failed\r\n");
         return 1;
     }
-    cli_printf(c, "copied %lu bytes\r\n", (unsigned long)off);
+    cli_printf(c, "\rcopied %lu bytes\r\n", (unsigned long)off);
     return 0;
 }
 
