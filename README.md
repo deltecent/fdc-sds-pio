@@ -59,11 +59,13 @@ The prompt is the host name; a leading `* ` means the config has unsaved edits.
 |---|---|
 | `help` / `?` | List commands (or `help <cmd>`) |
 | `version` | Firmware version |
-| `dir` / `ls` `[glob]` | List SD files (e.g. `dir *.dsk`) |
+| `dir` / `ls` `[glob\|subdir]` | List SD files (e.g. `dir *.dsk`); descends into a subdirectory (`dir cpm`, `dir cpm/*.dsk`) |
 | `type` / `cat` `<file>` | Print a text file |
 | `copy` / `cp` `<src> <dst>` | Copy a file; each endpoint may be an SD name or a `tnfs://` URL, and `<src>` may also be an `http(s)://` URL |
 | `rename` / `mv` `<old> <new>` | Rename a file |
 | `delete` / `rm` `<file>` | Delete a file |
+| `mkdir` / `md` `<dir>` | Create a directory |
+| `rmdir` / `rd` `<dir>` | Remove an empty directory |
 | `mount` `[<drive> <file>]` | Show the mount table, or mount an image |
 | `unmount` / `umount` `<drive>` | Unmount a drive |
 | `dump` `[drive [track [len]]]` | Hex-dump a track buffer |
@@ -86,11 +88,18 @@ credentials, timezone, and the four mounted drives — reload on the next boot.
 
 ## Batch files
 
-`exec <name>` runs a batch file from the SD root, one command per line. `<name>` is
-tried as given and then with a `.bat` suffix, so `exec cpm3` runs `cpm3.bat`. Blank
-lines are skipped and lines starting with `#` are echoed as comments. Typing an unknown
-command that names a batch file (or has a matching `<name>.bat`) auto-runs it, so
-`cpm3` at the prompt is the same as `exec cpm3.bat`.
+`exec <name>` runs a batch file, one command per line. `<name>` is tried as given and
+then with a `.bat` suffix, so `exec cpm3` runs `cpm3.bat`. Blank lines are skipped and
+lines starting with `#` are echoed as comments. Typing an unknown command that names a
+batch file (or has a matching `<name>.bat`) auto-runs it, so `cpm3` at the prompt is the
+same as `exec cpm3.bat`.
+
+The batch file itself may live in a subdirectory (`exec basic/setup.bat`), but the
+commands *inside* it always resolve paths from the **SD root**, not the batch file's
+folder — a batch is run exactly as if you had typed its lines at the prompt. So write
+any filename in a batch root-relative: a `setup.bat` in `basic/` that mounts an image
+next to it uses `mount 0 basic/setup.dsk`, not `mount 0 setup.dsk`. (This also means a
+disk-set folder isn't relocatable by drag-and-drop — its batch paths encode the folder.)
 
 If `/autoexec.bat` exists it runs once at boot, after the drives configured in NVS are
 mounted and before the first prompt — a convenient place to mount a disk set.

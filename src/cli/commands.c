@@ -53,6 +53,8 @@ static int cmd_unmount(cli_console_t *c, int argc, char **argv);
 static int cmd_dump(cli_console_t *c, int argc, char **argv);
 static int cmd_type(cli_console_t *c, int argc, char **argv);
 static int cmd_delete(cli_console_t *c, int argc, char **argv);
+static int cmd_mkdir(cli_console_t *c, int argc, char **argv);
+static int cmd_rmdir(cli_console_t *c, int argc, char **argv);
 static int cmd_rename(cli_console_t *c, int argc, char **argv);
 static int cmd_copy(cli_console_t *c, int argc, char **argv);
 static int cmd_save(cli_console_t *c, int argc, char **argv);
@@ -93,12 +95,16 @@ static const char D_baud[] =
     "reboots.\r\n"
     "usage: baud [<rate>]        (with no rate, shows the current speed)\r\n";
 static const char D_dir[] =
-    "With a pattern, shows only matching files; with a tnfs:// URL, lists a\r\n"
-    "directory on a TNFS server.\r\n"
-    "usage: dir [<pattern> | tnfs://<host>/<path>]\r\n"
+    "With a pattern, shows only matching files; with a subdirectory name, lists\r\n"
+    "that folder; with a tnfs:// URL, lists a directory on a TNFS server.\r\n"
+    "Subdirectories are shown with a trailing '/', listed first, then files,\r\n"
+    "each in case-insensitive alphabetical order.\r\n"
+    "usage: dir [<pattern> | <subdir> | tnfs://<host>/<path>]\r\n"
     "examples:\r\n"
     "  dir                 list every file\r\n"
     "  dir *.DSK           list only .DSK files\r\n"
+    "  dir cpm             list the cpm/ subdirectory\r\n"
+    "  dir cpm/*.DSK       list .DSK files under cpm/\r\n"
     "  dir tnfs://192.168.1.10/disks\r\n";
 static const char D_mount[] =
     "With no arguments, shows what is mounted on each drive.\r\n"
@@ -169,11 +175,20 @@ static const char D_type[] =
     "usage: type <file>\r\n";
 static const char D_exec[] =
     "One command per line; lines starting with '#' are comments. The .bat\r\n"
-    "extension is optional.\r\n"
+    "extension is optional. The batch file may be in a subdirectory (exec\r\n"
+    "basic/setup.bat), but paths inside it resolve from the SD root, not the\r\n"
+    "batch's folder - so write them root-relative (mount 0 basic/setup.dsk).\r\n"
     "usage: exec <file>\r\n";
 static const char D_delete[] =
     "This cannot be undone.\r\n"
     "usage: delete <file>\r\n";
+static const char D_mkdir[] =
+    "Creates a directory on the SD card. Any parent directories must already\r\n"
+    "exist. Names may include '/' to create a folder inside an existing one.\r\n"
+    "usage: mkdir <dir>\r\n";
+static const char D_rmdir[] =
+    "Removes a directory from the SD card. The directory must be empty.\r\n"
+    "usage: rmdir <dir>\r\n";
 static const char D_rename[] =
     "usage: rename <old-name> <new-name>\r\n";
 static const char D_copy[] =
@@ -220,6 +235,8 @@ static const cli_command_t k_commands[] = {
     { "exec",     "run",    "Run a batch file of commands",        cmd_exec,   D_exec     },
     { "logout",   "exit",   "Disconnect this network session",     cmd_logout, NULL       },
     { "delete",   "rm",     "Delete a file from SD",               cmd_delete, D_delete   },
+    { "mkdir",    "md",     "Create a directory on SD",            cmd_mkdir,  D_mkdir    },
+    { "rmdir",    "rd",     "Remove an empty directory on SD",     cmd_rmdir,  D_rmdir    },
     { "rename",   "mv",     "Rename a file on SD",                 cmd_rename, D_rename   },
     { "copy",     "cp",     "Copy a file (SD/TNFS, or HTTP src)",  cmd_copy,   D_copy     },
     { "loopback", "lb",     "Run the FDC+ serial loopback test",   cmd_loopback, D_loopback },
@@ -347,6 +364,30 @@ static int cmd_dir_remote(cli_console_t *c, const char *url, const char *spec)
     return 0;
 }
 
+/* Upper bound on entries `dir` buffers for sorting, so a huge directory can't exhaust
+ * the heap; past this the listing is truncated with a note. */
+#define DIR_MAX_ENTS 1024
+
+/* One collected directory entry (name is a flexible trailing array). */
+struct dir_ent {
+    uint32_t size;
+    bool     is_dir;
+    char     name[];
+};
+
+/* Sort order for `dir`: directories first, then case-insensitive alphabetical, with a
+ * case-sensitive tiebreak so names differing only in case have a stable order. */
+static int dir_ent_cmp(const void *pa, const void *pb)
+{
+    const struct dir_ent *a = *(const struct dir_ent *const *)pa;
+    const struct dir_ent *b = *(const struct dir_ent *const *)pb;
+    if (a->is_dir != b->is_dir) {
+        return a->is_dir ? -1 : 1;
+    }
+    int r = strcasecmp(a->name, b->name);
+    return r ? r : strcmp(a->name, b->name);
+}
+
 static int cmd_dir(cli_console_t *c, int argc, char **argv)
 {
     /* A tnfs:// argument lists a remote server directory (§10.1); an optional second
@@ -355,23 +396,74 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
         return cmd_dir_remote(c, argv[1], (argc > 2) ? argv[2] : NULL);
     }
 
-    /* Optional glob filter, e.g. `dir *.BAT` (DESIGN.md §8.4). */
-    const char *spec = (argc > 1) ? argv[1] : NULL;
-    const bool spec_is_dot = spec && spec[0] == '.';
-
     if (!sd_mounted()) {
         cli_write(c, "no SD card\r\n");
         return 1;
     }
 
-    DIR *d = opendir(SD_MOUNT_POINT);
+    /*
+     * Split an optional argument into a subdirectory to list and a glob leaf, so a
+     * bare `dir`, a root glob, a subdir name, and a glob inside a subdir all work
+     * (DESIGN.md §8.4/§10):
+     *   - a '/' splits the arg into <subdir>/<leaf>; the leaf, if any, is the glob;
+     *   - a bare arg naming an existing directory lists that directory (no glob);
+     *   - otherwise the bare arg is a glob applied to the root.
+     */
+    char reldir[CONFIG_FILE_CAP] = ""; /* subdirectory under the root; "" = root */
+    const char *spec = NULL;           /* glob leaf, or NULL to list everything */
+    const char *arg = (argc > 1) ? argv[1] : NULL;
+    if (arg) {
+        char probe[16 + CONFIG_FILE_CAP];
+        struct stat st;
+        if (strlen(arg) < sizeof reldir && sd_path(arg, probe, sizeof probe) >= 0 &&
+            stat(probe, &st) == 0 && S_ISDIR(st.st_mode)) {
+            snprintf(reldir, sizeof reldir, "%s", arg); /* the whole arg names a directory */
+        } else {
+            const char *slash = strrchr(arg, '/');
+            if (slash) {                                /* <subdir>/<leaf glob> */
+                size_t dlen = (size_t)(slash - arg);
+                if (dlen >= sizeof reldir) {
+                    cli_printf(c, "%s: invalid filename\r\n", arg);
+                    return 1;
+                }
+                memcpy(reldir, arg, dlen);
+                reldir[dlen] = '\0';
+                spec = (slash[1] != '\0') ? slash + 1 : NULL;
+            } else {
+                spec = arg;                             /* a glob applied to the root */
+            }
+        }
+    }
+    const bool spec_is_dot = spec && spec[0] == '.';
+
+    /* Absolute path of the directory to list: the root, or a subdir under it. */
+    char dirpath[16 + CONFIG_FILE_CAP];
+    if (reldir[0]) {
+        if (sd_path(reldir, dirpath, sizeof dirpath) < 0) {
+            cli_printf(c, "%s: invalid filename\r\n", reldir);
+            return 1;
+        }
+    } else {
+        snprintf(dirpath, sizeof dirpath, "%s", SD_MOUNT_POINT);
+    }
+
+    DIR *d = opendir(dirpath);
     if (!d) {
-        cli_printf(c, "dir: %s\r\n", strerror(errno));
+        cli_printf(c, "%s: %s\r\n", arg ? arg : SD_MOUNT_POINT, strerror(errno));
         return 1;
     }
 
-    unsigned files = 0;
-    uint32_t total = 0;
+    /* Name the directory being listed (root shows as '/'). */
+    if (reldir[0]) {
+        cli_printf(c, "Directory of /%s\r\n", reldir);
+    } else {
+        cli_write(c, "Directory of /\r\n");
+    }
+
+    /* Collect matching entries, then sort (dirs first, A-Z ci) before printing. */
+    struct dir_ent **ents = NULL;
+    size_t count = 0, cap = 0;
+    bool truncated = false;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         /* Hide dotfiles (DESIGN.md §8.1) unless the spec itself starts with '.' (§8.4). */
@@ -381,21 +473,78 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
         if (spec && !wildcard_match_ci(spec, e->d_name)) {
             continue;
         }
-        char path[16 + CONFIG_FILE_CAP];
-        if (sd_path(e->d_name, path, sizeof path) < 0) {
+        /* Stat the entry through its full path (reldir/name, or just name at root). */
+        char rel[2 * CONFIG_FILE_CAP];
+        if (reldir[0]) {
+            if ((size_t)snprintf(rel, sizeof rel, "%s/%s", reldir, e->d_name) >= sizeof rel) {
+                continue;
+            }
+        } else {
+            snprintf(rel, sizeof rel, "%s", e->d_name);
+        }
+        char path[16 + 2 * CONFIG_FILE_CAP];
+        if (sd_path(rel, path, sizeof path) < 0) {
             continue;
         }
         struct stat st;
-        if (stat(path, &st) != 0 || S_ISDIR(st.st_mode)) {
-            continue; /* flat root: skip directories */
+        if (stat(path, &st) != 0) {
+            continue;
         }
-        cli_printf(c, "%10lu  %s\r\n", (unsigned long)st.st_size, e->d_name);
-        total += (uint32_t)st.st_size;
-        ++files;
+        if (count >= DIR_MAX_ENTS) { /* cap the listing so the heap can't be exhausted */
+            truncated = true;
+            break;
+        }
+        if (count == cap) {
+            size_t ncap = cap ? cap * 2 : 32;
+            struct dir_ent **na = realloc(ents, ncap * sizeof *na);
+            if (!na) {
+                truncated = true;
+                break;
+            }
+            ents = na;
+            cap = ncap;
+        }
+        struct dir_ent *ent = malloc(sizeof *ent + strlen(e->d_name) + 1);
+        if (!ent) {
+            truncated = true;
+            break;
+        }
+        ent->size = (uint32_t)st.st_size;
+        ent->is_dir = S_ISDIR(st.st_mode);
+        strcpy(ent->name, e->d_name);
+        ents[count++] = ent;
     }
     closedir(d);
 
-    cli_printf(c, "%u file(s), %lu bytes\r\n", files, (unsigned long)total);
+    if (count > 1) {
+        qsort(ents, count, sizeof *ents, dir_ent_cmp);
+    }
+
+    unsigned files = 0, dirs = 0;
+    uint32_t total = 0;
+    for (size_t i = 0; i < count; i++) {
+        struct dir_ent *ent = ents[i];
+        if (ent->is_dir) {
+            cli_printf(c, "%10s  %s/\r\n", "<DIR>", ent->name);
+            ++dirs;
+        } else {
+            cli_printf(c, "%10lu  %s\r\n", (unsigned long)ent->size, ent->name);
+            total += ent->size;
+            ++files;
+        }
+        free(ent);
+    }
+    free(ents);
+
+    if (truncated) {
+        cli_printf(c, "(list truncated at %d entries)\r\n", DIR_MAX_ENTS);
+    }
+    if (dirs) {
+        cli_printf(c, "%u file(s), %u dir(s), %lu bytes\r\n",
+                   files, dirs, (unsigned long)total);
+    } else {
+        cli_printf(c, "%u file(s), %lu bytes\r\n", files, (unsigned long)total);
+    }
     return 0;
 }
 
@@ -621,6 +770,45 @@ static int cmd_delete(cli_console_t *c, int argc, char **argv)
         return 1;
     }
     cli_printf(c, "deleted %s\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_mkdir(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_write(c, "usage: mkdir <dir>\r\n");
+        return 1;
+    }
+    char path[16 + CONFIG_FILE_CAP];
+    if (!resolve(c, argv[1], path, sizeof path)) {
+        return 1;
+    }
+    if (mkdir(path, 0777) != 0) {
+        cli_printf(c, "%s: %s\r\n", argv[1], strerror(errno));
+        return 1;
+    }
+    cli_printf(c, "created %s\r\n", argv[1]);
+    return 0;
+}
+
+static int cmd_rmdir(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_write(c, "usage: rmdir <dir>\r\n");
+        return 1;
+    }
+    char path[16 + CONFIG_FILE_CAP];
+    if (!resolve(c, argv[1], path, sizeof path)) {
+        return 1;
+    }
+    if (rmdir(path) != 0) {
+        /* FATFS refuses a non-empty directory with EACCES; say so plainly. */
+        const char *why = (errno == EACCES || errno == ENOTEMPTY)
+                              ? "directory not empty" : strerror(errno);
+        cli_printf(c, "%s: %s\r\n", argv[1], why);
+        return 1;
+    }
+    cli_printf(c, "removed %s\r\n", argv[1]);
     return 0;
 }
 
