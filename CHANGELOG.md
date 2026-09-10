@@ -26,9 +26,13 @@ firmware ended at 0.25.
   case-insensitive alphabetical).
 - `rename` / `mv` now moves a file between directories, not just renames in place, now
   that paths accept subdirectories.
-- `exec` can run a batch file from a subdirectory (`exec basic/setup.bat`); commands
-  *inside* a batch still resolve their paths from the SD root, so batch paths are written
-  root-relative (documented — there is no working-directory model).
+- `exec` runs a batch file from its own folder: `exec basic/setup.bat` runs the file, and
+  while it runs bare names inside it resolve relative to the batch's directory (a
+  `setup.bat` in `basic/` writes `mount 0 setup.dsk`), so a disk-set folder is
+  self-contained and relocatable. Nested `exec` stacks; the interactive prompt always
+  runs at the SD root (no `cd`); a batch cannot climb out of its folder (`..` rejected);
+  and a `mount` made inside a batch persists its root-relative path so it re-mounts at
+  boot.
 
 ## [1.0.2] - 2026-09-10
 

@@ -94,12 +94,15 @@ lines starting with `#` are echoed as comments. Typing an unknown command that n
 batch file (or has a matching `<name>.bat`) auto-runs it, so `cpm3` at the prompt is the
 same as `exec cpm3.bat`.
 
-The batch file itself may live in a subdirectory (`exec basic/setup.bat`), but the
-commands *inside* it always resolve paths from the **SD root**, not the batch file's
-folder — a batch is run exactly as if you had typed its lines at the prompt. So write
-any filename in a batch root-relative: a `setup.bat` in `basic/` that mounts an image
-next to it uses `mount 0 basic/setup.dsk`, not `mount 0 setup.dsk`. (This also means a
-disk-set folder isn't relocatable by drag-and-drop — its batch paths encode the folder.)
+A batch **runs from its own folder**. `exec basic/setup.bat` runs the file, and while it
+runs, bare names inside it resolve relative to the batch's directory — so a `setup.bat`
+in `basic/` that mounts an image next to it just uses `mount 0 setup.dsk`. That makes a
+disk-set folder **self-contained and relocatable**: drop `basic/` anywhere on the card
+and its batch still works. Nested `exec` stacks (an inner batch resolves under its
+parent's folder), and a `mount` made inside a batch is stored root-relative so it
+re-mounts correctly at boot. A batch can't climb out of its folder — `..` is rejected —
+and the **interactive prompt always runs at the SD root** (there's no `cd`; a working
+directory exists only while a batch is running).
 
 If `/autoexec.bat` exists it runs once at boot, after the drives configured in NVS are
 mounted and before the first prompt — a convenient place to mount a disk set.

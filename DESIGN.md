@@ -451,16 +451,27 @@ byte ever leaks into a command line.
 - Unknown command ending in `.bat` (or with a matching `/<name>.bat`) is auto-run.
 - At startup, run `/autoexec.bat` if present.
 - Example (`SDCARD/8mb.bat`): `mount 0 CPM22-8MB-56K.DSK` … etc.
-- **The batch *file* may live in a subdirectory** — `exec basic/setup.bat` finds and
-  runs it (§10) — **but the *commands inside* always resolve relative to the SD root**,
-  not the batch file's folder. There is no working-directory / `cd` model (§10), so a
-  batch is dispatched exactly as if its lines were typed at the prompt, whose frame of
-  reference is always `/sd`. A path inside a batch must therefore be spelled root-
-  relative: a `setup.bat` in `basic/` that mounts an image alongside it writes
-  `mount 0 basic/setup.dsk`, not `mount 0 setup.dsk`. Consequence: a disk-set folder is
-  **not relocatable** by drag-and-drop — its batch paths encode the folder. (Making
-  bare names resolve against the batch's own directory would require the deferred
-  current-directory model; see §10.)
+- **A batch runs from its own folder (batch working directory).** `exec basic/setup.bat`
+  finds and runs the file (§10), and **while it runs, bare names inside it resolve
+  relative to the batch's own folder** — so a `setup.bat` in `basic/` that mounts an image
+  alongside it writes `mount 0 setup.dsk`, not `mount 0 basic/setup.dsk`. This makes a
+  disk-set folder **self-contained and relocatable**: drop `basic/` anywhere on the card
+  and its batch still works. The model:
+  - The cwd is set to the batch's directory for the batch's duration and restored when it
+    returns; nested `exec` stacks (an inner batch resolves under its parent's folder), so
+    `exec sub/inner.bat` from within `basic/` runs `inner.bat` with cwd `basic/sub`.
+  - **The interactive prompt always runs at the SD root** — there is no `cd` command and
+    the user never "moves" (§10). A cwd exists *only* while a batch is executing.
+  - A batch **can never climb out of its folder**: the same confinement `sd_path()`
+    enforces still applies (leading `/`, `\`, and any `..` are rejected), so batch paths
+    reach only into the folder and its subtree, never a sibling or the root.
+  - `mount` records the **root-relative** (cwd-folded) name, so a mount made inside a
+    batch persists and auto-mounts correctly from the prompt and at boot, where the cwd
+    is the root. `update local` always flashes `/sd/firmware.bin` from the root,
+    independent of any batch cwd.
+  - Implementation note: the cwd lives entirely in the CLI/batch layer (a `qualify()`
+    step folds it into a name before resolution); `sd_path()` remains a pure root
+    resolver, and the storage/disk layers are unaware of it.
 
 ### 8.3 Timezones **[CLAUDE — resolved]**
 
@@ -656,10 +667,18 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
     `dir cpm/*.DSK`). `mkdir`/`rmdir` (aliases `md`/`rd`) create and remove directories;
     `rmdir` requires the directory be empty. FTP already navigated subdirectories
     (`CWD`/`MKD`/`RMD`) independently of the CLI.
-  - **Still deferred.** There is **no working-directory / `cd` model**: names are always
-    resolved relative to the SD root, not a per-session current directory. Full
-    `cd`-style navigation stays in the post-v1 / web-GUI phase; it would add per-console
-    session state and relative-path resolution on top of what's here.
+  - **Batch working directory (added post-1.0.2).** A batch file runs from its own
+    folder: while it executes, bare names inside it resolve relative to the batch's
+    directory instead of the SD root, so a disk-set folder is self-contained and
+    relocatable (§8.2). It is a batch-scoped cwd — set to the batch's folder on entry,
+    stacked across nested `exec`, restored on exit — implemented as a `qualify()` step in
+    the CLI layer that folds the cwd into a name before `sd_path()` (which stays a pure
+    root resolver). `mount` persists the root-relative (cwd-folded) name so it re-mounts
+    from the root at boot. `..` is still rejected, so a batch cannot leave its folder.
+  - **Still deferred.** There is **no interactive `cd`**: the prompt always runs at the
+    SD root, and a cwd exists only during a batch. Full `cd`-style navigation at the
+    prompt stays in the post-v1 / web-GUI phase; it would add per-console session state on
+    top of the batch cwd that exists now.
 
 ### 10.1 Remote images over TNFS **[RESOLVED: in scope for v1]**
 
