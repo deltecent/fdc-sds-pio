@@ -784,8 +784,14 @@ it): `stat`, `read`, `writ`, `read_retry` (FDC re-read the same drive/track — 
 signal of a READ the FDC rejected, since it sends no error packet), `not_ready`,
 `cmd_csum` (bad command-header checksum), `data_csum` (bad WRIT track-data checksum →
 `WSTA 2`), `cmd_timeout` (command header truncated), `data_timeout` (WRIT track data /
-its checksum incomplete), `unknown`; plus a formatted "last op" string. `dump`
-hex-dumps the track buffer. `clear` resets. Not persisted.
+its checksum incomplete), `unknown`; plus a formatted "last op" string. Two counters
+come straight from the UART driver's event queue and name the *hardware* mechanism
+behind a checksum/timeout: `fifo_ovf` (RX FIFO/ring overflow — bytes lost because the
+RX ISR was starved) and `frame_err` (a framing error — bits mis-sampled, i.e. a baud
+mismatch or electrical/noise problem). To keep that ISR off the WiFi/lwIP core, the
+UART driver is installed *by the fdc task itself* (core 1), not from `app_main`
+(core 0) — `esp_intr_alloc` binds the interrupt to the installing core (§5.2/§6.1).
+`dump` hex-dumps the track buffer. `clear` resets. Not persisted.
 
 **Console log verbosity.** IDF's `ESP_LOG` output (WiFi/net/fdc/sd/ftp INFO, etc.) is
 gated by a runtime level so the console is quiet in normal use and verbose only on

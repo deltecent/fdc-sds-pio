@@ -856,6 +856,10 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
                "cmd-tmo", (unsigned long)s.cmd_timeout);
     cli_printf(c, "  %-10s%-6lu(WRIT track data incomplete)\r\n",
                "data-tmo", (unsigned long)s.data_timeout);
+    cli_printf(c, "  %-10s%-6lu(RX overflow: bytes lost, ISR starved)\r\n",
+               "fifo-ovf", (unsigned long)s.fifo_ovf);
+    cli_printf(c, "  %-10s%-6lu(RX framing: baud / electrical)\r\n",
+               "frame-err", (unsigned long)s.frame_err);
     cli_printf(c, "  %-10s%lu\r\n", "unknown",  (unsigned long)s.unknown);
     cli_printf(c, "  %-10s%s\r\n",  "last",
                s.last_op[0] ? s.last_op : "(none)");
@@ -1434,9 +1438,11 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
                (unsigned long)s.stat, (unsigned long)s.read, (unsigned long)s.writ,
                (unsigned long)s.read_retry, (unsigned long)s.not_ready,
                (unsigned long)s.unknown);
-    cli_printf(c, "cmd-csum %lu  data-csum %lu  cmd-tmo %lu  data-tmo %lu\r\n",
+    cli_printf(c, "cmd-csum %lu  data-csum %lu  cmd-tmo %lu  data-tmo %lu  "
+                  "fifo-ovf %lu  frame-err %lu\r\n",
                (unsigned long)s.cmd_csum, (unsigned long)s.data_csum,
-               (unsigned long)s.cmd_timeout, (unsigned long)s.data_timeout);
+               (unsigned long)s.cmd_timeout, (unsigned long)s.data_timeout,
+               (unsigned long)s.fifo_ovf, (unsigned long)s.frame_err);
     cli_printf(c, "Last op:   %s\r\n", s.last_op[0] ? s.last_op : "(none)");
 
     cli_write(c, "==== end diagnostics ====\r\n");

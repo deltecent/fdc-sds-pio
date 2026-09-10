@@ -40,6 +40,8 @@ typedef struct {
     uint32_t cmd_timeout;  /* command block truncated before the 10 bytes arrived */
     uint32_t data_timeout; /* WRIT track data / its checksum did not fully arrive */
     uint32_t read_retry;   /* READ repeating the previous drive/track (FDC re-reading) */
+    uint32_t fifo_ovf;     /* UART RX FIFO / ring overflow: bytes lost (ISR starved) */
+    uint32_t frame_err;    /* UART framing error: bits mis-sampled (baud / electrical) */
     uint32_t unknown;      /* unrecognized 4-byte command mnemonics */
     char     last_op[40];
 } fdc_stats_t;

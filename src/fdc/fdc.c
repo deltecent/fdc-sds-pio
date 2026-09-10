@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -52,6 +53,8 @@ static const char *TAG = "fdc";
 
 /* RX ring must hold a full incoming write track (8192 + 2 checksum) with headroom. */
 #define FDC_UART_RX_BUF  (DISK_TRACK_BUF_SIZE + 512)
+/* UART event queue depth: enough to catch error events between task poll cycles. */
+#define FDC_UART_EVT_QUEUE 24
 
 static const uart_port_t s_port = FDC_UART_NUM;
 
@@ -65,6 +68,9 @@ static const gpio_num_t s_drive_leds[DISK_MAX_DRIVE] = {
 
 static TaskHandle_t       s_task;
 static esp_timer_handle_t s_led_timer;
+
+/* UART hardware event queue (FIFO overflow, framing errors), drained by the task. */
+static QueueHandle_t      s_uart_evt_q;
 
 /* Live baud + a pending change queued by fdc_set_baud(), applied by the task. */
 static uint32_t          s_baud;
@@ -418,13 +424,80 @@ static void apply_pending_baud(void)
     }
 }
 
+/*
+ * Drain the UART driver's event queue, counting hardware-level RX faults so `stats`
+ * can name the mechanism behind a protocol checksum/timeout: a FIFO/ring overflow
+ * (bytes lost because the ISR was starved) vs a framing error (bits mis-sampled, i.e.
+ * a baud mismatch or electrical/noise problem). Called between transactions, so a
+ * flush on overflow only discards an already-corrupt stream (resync, DESIGN.md §6.4).
+ */
+static void drain_uart_events(void)
+{
+    uart_event_t ev;
+    while (xQueueReceive(s_uart_evt_q, &ev, 0) == pdTRUE) {
+        switch (ev.type) {
+        case UART_FIFO_OVF:
+        case UART_BUFFER_FULL:
+            uart_flush_input(s_port);
+            stat_lock();
+            s_stats.fifo_ovf++;
+            stat_unlock();
+            break;
+        case UART_FRAME_ERR:
+        case UART_PARITY_ERR:
+            stat_lock();
+            s_stats.frame_err++;
+            stat_unlock();
+            break;
+        default: /* UART_DATA, UART_BREAK, etc.: not a fault, ignore */
+            break;
+        }
+    }
+}
+
+/*
+ * Install and configure UART2 for the FDC+ link. Called from the fdc task so the
+ * driver's RX interrupt is allocated on core 1 (APP), off the WiFi/lwIP core where the
+ * ISR could be delayed long enough to overrun the 128-byte HW FIFO (DESIGN.md §5.2).
+ */
+static esp_err_t fdc_uart_start(void)
+{
+    uart_config_t uc = {
+        .baud_rate = (int)s_baud,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    esp_err_t err = uart_driver_install(s_port, FDC_UART_RX_BUF, 0,
+                                        FDC_UART_EVT_QUEUE, &s_uart_evt_q, 0);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = uart_param_config(s_port, &uc);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return uart_set_pin(s_port, PIN_FDC_UART_TX, PIN_FDC_UART_RX,
+                        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
+
 static void fdc_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "fdc task on core %d, baud %lu", xPortGetCoreID(), (unsigned long)s_baud);
+    if (fdc_uart_start() != ESP_OK) {
+        ESP_LOGE(TAG, "FDC+ UART start failed; task exiting");
+        s_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "FDC+ engine up on UART%d (RX=%d TX=%d) core %d @ %lu baud", s_port,
+             PIN_FDC_UART_RX, PIN_FDC_UART_TX, xPortGetCoreID(), (unsigned long)s_baud);
 
     for (;;) {
         apply_pending_baud();
+        drain_uart_events();
 
         if (s_lb_req) {
             run_loopback();
@@ -490,26 +563,13 @@ esp_err_t fdc_init(void)
     };
     ESP_ERROR_CHECK(esp_timer_create(&targs, &s_led_timer));
 
-    uart_config_t uc = {
-        .baud_rate = (int)s_baud,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    ESP_ERROR_CHECK(uart_driver_install(s_port, FDC_UART_RX_BUF, 0, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(s_port, &uc));
-    ESP_ERROR_CHECK(uart_set_pin(s_port, PIN_FDC_UART_TX, PIN_FDC_UART_RX,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-
+    /* UART2 is installed by the task itself (fdc_uart_start) so its RX interrupt lands
+     * on core 1, off the WiFi/lwIP core (DESIGN.md §5.2/§6.1). */
     BaseType_t ok = xTaskCreatePinnedToCore(fdc_task, "fdc", FDC_TASK_STACK, NULL,
                                             FDC_TASK_PRIO, &s_task, FDC_TASK_CORE);
     if (ok != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "FDC+ engine up on UART%d (RX=%d TX=%d) @ %lu baud", s_port,
-             PIN_FDC_UART_RX, PIN_FDC_UART_TX, (unsigned long)s_baud);
     return ESP_OK;
 }
