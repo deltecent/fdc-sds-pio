@@ -34,6 +34,13 @@ pio device monitor -b 115200   # serial console
 Up to four disk images (drives 0–3) are served over the FDC+ serial link. The link baud
 is configurable (`baud`); 403200 is the FDC+ high-speed rate.
 
+> **Swapping the microSD card:** always `reboot` (or power-cycle) after changing the
+> card. The card is mounted once at boot and there's no card-detect line, so the firmware
+> can't tell that a card was pulled — it keeps using the first card's cached filesystem
+> layout. Reading from a different card returns wrong data, and **writing to it (a disk
+> write, `copy`, or FTP upload) can corrupt the new card's filesystem.** Reboot first, and
+> the new card is mounted cleanly.
+
 ## Console
 
 Reach the CLI two ways, both sharing the same command set:
