@@ -133,6 +133,7 @@ ssid MyNetwork
 pass MySecret
 wifi on
 save
+reboot
 ```
 
 On connect the device advertises `<hostname>.local` (mDNS), syncs the clock over NTP,
