@@ -95,17 +95,19 @@ credentials, timezone, and the four mounted drives — reload on the next boot.
 
 ## Batch files
 
-`exec <name>` runs a batch file, one command per line. `<name>` is tried as given and
-then with a `.bat` suffix, so `exec cpm3` runs `cpm3.bat`. Blank lines are skipped and
-lines starting with `#` are echoed as comments. Typing an unknown command that names a
-batch file (or has a matching `<name>.bat`) auto-runs it, so `cpm3` at the prompt is the
-same as `exec cpm3.bat`.
+A batch file holds one command per line; blank lines are skipped and lines starting with
+`#` are echoed as comments. **Just type its name to run it** — an entered command that
+isn't built in but names a batch file runs automatically. The name is tried as given and
+then with a `.bat` suffix, so `cpm3` runs `cpm3.bat` and `basic/basic5` runs
+`basic/basic5.bat`. `exec <name>` (alias `run`) does the same thing explicitly, which is
+mainly useful for a batch file whose name has no `.bat` extension.
 
-A batch **runs from its own folder**. `exec basic/setup.bat` runs the file, and while it
-runs, bare names inside it resolve relative to the batch's directory — so a `setup.bat`
-in `basic/` that mounts an image next to it just uses `mount 0 setup.dsk`. That makes a
-disk-set folder **self-contained and relocatable**: drop `basic/` anywhere on the card
-and its batch still works. Nested `exec` stacks (an inner batch resolves under its
+A batch **runs from its own folder**. `basic/basic5` runs the file, and while it
+runs, bare names inside it resolve relative to the batch's directory — so `basic5.bat`
+in `basic/` mounts an image sitting next to it with just `mount 0 "Disk BASIC 5.0.dsk"`
+(no `basic/` prefix). That makes a disk-set folder **self-contained and relocatable**:
+drop `basic/` anywhere on the card
+and its batch still works. Nested batches stack (an inner batch resolves under its
 parent's folder), and a `mount` made inside a batch is stored root-relative so it
 re-mounts correctly at boot. A batch can't climb out of its folder — `..` is rejected —
 and the **interactive prompt always runs at the SD root** (there's no `cd`; a working
