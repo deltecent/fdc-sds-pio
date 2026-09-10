@@ -176,8 +176,10 @@ static const char D_type[] =
 static const char D_exec[] =
     "One command per line; lines starting with '#' are comments. The .bat\r\n"
     "extension is optional. The batch file may be in a subdirectory (exec\r\n"
-    "basic/setup.bat), but paths inside it resolve from the SD root, not the\r\n"
-    "batch's folder - so write them root-relative (mount 0 basic/setup.dsk).\r\n"
+    "basic/setup.bat); while it runs, bare names inside it resolve relative to\r\n"
+    "the batch's own folder, so a disk-set folder is self-contained (setup.bat\r\n"
+    "in basic/ writes 'mount 0 setup.dsk'). No '..' - a batch stays in its\r\n"
+    "folder. The prompt itself always runs at the SD root.\r\n"
     "usage: exec <file>\r\n";
 static const char D_delete[] =
     "This cannot be undone.\r\n"
@@ -264,13 +266,38 @@ const cli_command_t *cli_commands(size_t *count)
 /* ---- helpers --------------------------------------------------------------- */
 
 /* Resolve an SD filename arg to an absolute path; report and return false on error. */
+/* ---- batch working directory (DESIGN.md §8.2/§10) --------------------------- *
+ * While a batch file runs, bare names inside it resolve relative to the batch's own
+ * folder rather than the SD root, so a disk-set folder is self-contained and can be
+ * relocated by dragging it elsewhere on the card. The cwd is a root-relative directory
+ * ("" = root); qualify() folds it into a user-supplied name before sd_path() resolves
+ * the result, so the whole model lives here in the CLI layer and sd_path() stays a
+ * pure root resolver. The interactive prompt always runs at the root (cwd ""), and
+ * there is no `cd` command. Not per-console: one batch runs at a time (single-user,
+ * DESIGN.md §8.2), so a single global is enough. */
+static char s_batch_cwd[CONFIG_FILE_CAP]; /* "" = SD root */
+
+/*
+ * Fold the batch cwd into a user-supplied name, yielding a root-relative path for
+ * sd_path(). With no active cwd the name passes through unchanged. Returns false only
+ * if the result would overflow buf; sd_path() still enforces the ".."/leading-'/'/'\\'
+ * confinement rules on the qualified name.
+ */
+static bool qualify(const char *name, char *buf, size_t len)
+{
+    int n = s_batch_cwd[0] ? snprintf(buf, len, "%s/%s", s_batch_cwd, name)
+                           : snprintf(buf, len, "%s", name);
+    return n >= 0 && (size_t)n < len;
+}
+
 static bool resolve(cli_console_t *c, const char *name, char *buf, size_t len)
 {
     if (!sd_mounted()) {
         cli_write(c, "no SD card\r\n");
         return false;
     }
-    if (sd_path(name, buf, len) < 0) {
+    char qname[2 * CONFIG_FILE_CAP];
+    if (!qualify(name, qname, sizeof qname) || sd_path(qname, buf, len) < 0) {
         cli_printf(c, "%s: invalid filename\r\n", name);
         return false;
     }
@@ -414,8 +441,10 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
     const char *arg = (argc > 1) ? argv[1] : NULL;
     if (arg) {
         char probe[16 + CONFIG_FILE_CAP];
+        char aq[2 * CONFIG_FILE_CAP];
         struct stat st;
-        if (strlen(arg) < sizeof reldir && sd_path(arg, probe, sizeof probe) >= 0 &&
+        if (strlen(arg) < sizeof reldir && qualify(arg, aq, sizeof aq) &&
+            sd_path(aq, probe, sizeof probe) >= 0 &&
             stat(probe, &st) == 0 && S_ISDIR(st.st_mode)) {
             snprintf(reldir, sizeof reldir, "%s", arg); /* the whole arg names a directory */
         } else {
@@ -436,13 +465,17 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
     }
     const bool spec_is_dot = spec && spec[0] == '.';
 
-    /* Absolute path of the directory to list: the root, or a subdir under it. */
+    /* Absolute path of the directory to list: the cwd (root, or a running batch's own
+     * folder), or a subdir named under it. */
     char dirpath[16 + CONFIG_FILE_CAP];
     if (reldir[0]) {
-        if (sd_path(reldir, dirpath, sizeof dirpath) < 0) {
+        char rq[2 * CONFIG_FILE_CAP];
+        if (!qualify(reldir, rq, sizeof rq) || sd_path(rq, dirpath, sizeof dirpath) < 0) {
             cli_printf(c, "%s: invalid filename\r\n", reldir);
             return 1;
         }
+    } else if (s_batch_cwd[0]) {
+        snprintf(dirpath, sizeof dirpath, "%s/%s", SD_MOUNT_POINT, s_batch_cwd);
     } else {
         snprintf(dirpath, sizeof dirpath, "%s", SD_MOUNT_POINT);
     }
@@ -453,9 +486,18 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
         return 1;
     }
 
-    /* Name the directory being listed (root shows as '/'). */
-    if (reldir[0]) {
-        cli_printf(c, "Directory of /%s\r\n", reldir);
+    /* Name the directory being listed, root-relative (root shows as '/'); a running
+     * batch's cwd is folded in so the header always reads from the SD root. */
+    char disp[2 * CONFIG_FILE_CAP];
+    if (s_batch_cwd[0] && reldir[0]) {
+        snprintf(disp, sizeof disp, "%s/%s", s_batch_cwd, reldir);
+    } else if (s_batch_cwd[0]) {
+        snprintf(disp, sizeof disp, "%s", s_batch_cwd);
+    } else {
+        snprintf(disp, sizeof disp, "%s", reldir);
+    }
+    if (disp[0]) {
+        cli_printf(c, "Directory of /%s\r\n", disp);
     } else {
         cli_write(c, "Directory of /\r\n");
     }
@@ -473,17 +515,9 @@ static int cmd_dir(cli_console_t *c, int argc, char **argv)
         if (spec && !wildcard_match_ci(spec, e->d_name)) {
             continue;
         }
-        /* Stat the entry through its full path (reldir/name, or just name at root). */
-        char rel[2 * CONFIG_FILE_CAP];
-        if (reldir[0]) {
-            if ((size_t)snprintf(rel, sizeof rel, "%s/%s", reldir, e->d_name) >= sizeof rel) {
-                continue;
-            }
-        } else {
-            snprintf(rel, sizeof rel, "%s", e->d_name);
-        }
-        char path[16 + 2 * CONFIG_FILE_CAP];
-        if (sd_path(rel, path, sizeof path) < 0) {
+        /* Stat the entry through the resolved directory path we opened. */
+        char path[sizeof dirpath + CONFIG_FILE_CAP];
+        if ((size_t)snprintf(path, sizeof path, "%s/%s", dirpath, e->d_name) >= sizeof path) {
             continue;
         }
         struct stat st;
@@ -616,14 +650,22 @@ static int cmd_mount(cli_console_t *c, int argc, char **argv)
         return 0;
     }
 
-    esp_err_t err = disk_mount(drive, argv[2]);
+    /* Fold a running batch's cwd into the name so a batch mounts an image from its own
+     * folder (DESIGN.md §8.2). The qualified, root-relative name is what we open, store,
+     * and persist, so it re-mounts correctly from the prompt and at boot (cwd = root). */
+    char qname[2 * CONFIG_FILE_CAP];
+    if (!qualify(argv[2], qname, sizeof qname)) {
+        cli_printf(c, "%s: invalid filename\r\n", argv[2]);
+        return 1;
+    }
+    esp_err_t err = disk_mount(drive, qname);
     if (err != ESP_OK) {
-        report_mount_err(c, argv[2], err);
+        report_mount_err(c, qname, err);
         return 1;
     }
     /* Persist the mount so `save` + reboot auto-mounts it (DESIGN.md §7/§12). */
-    config_set_drive(drive, argv[2]);
-    cli_printf(c, "drive %d: %s (%lu bytes)\r\n", drive, argv[2],
+    config_set_drive(drive, qname);
+    cli_printf(c, "drive %d: %s (%lu bytes)\r\n", drive, qname,
                (unsigned long)disk_image_size(drive));
     return 0;
 }
@@ -1463,14 +1505,20 @@ static bool batch_path(const char *name, char *buf, size_t len)
     if (!sd_mounted()) {
         return false;
     }
-    if (sd_path(name, buf, len) >= 0 && file_is_regular(buf)) {
+    /* Fold a running batch's cwd into the name so `exec sub/x.bat` and bare-name
+     * auto-run resolve under the current batch's own folder (DESIGN.md §8.2). */
+    char qname[2 * CONFIG_FILE_CAP];
+    if (!qualify(name, qname, sizeof qname)) {
+        return false;
+    }
+    if (sd_path(qname, buf, len) >= 0 && file_is_regular(buf)) {
         return true;
     }
-    size_t nl = strlen(name);
-    bool has_bat = (nl >= 4) && strcasecmp(name + nl - 4, ".bat") == 0;
+    size_t nl = strlen(qname);
+    bool has_bat = (nl >= 4) && strcasecmp(qname + nl - 4, ".bat") == 0;
     if (!has_bat) {
-        char withext[CONFIG_FILE_CAP + 8];
-        snprintf(withext, sizeof withext, "%s.bat", name);
+        char withext[2 * CONFIG_FILE_CAP + 8];
+        snprintf(withext, sizeof withext, "%s.bat", qname);
         if (sd_path(withext, buf, len) >= 0 && file_is_regular(buf)) {
             return true;
         }
@@ -1523,16 +1571,43 @@ static void run_batch_file(cli_console_t *c, const char *path)
     fclose(f);
 }
 
-/* Run a resolved path under the nesting guard. */
+/* Derive a batch file's own directory (root-relative) from its resolved /sd/… path,
+ * e.g. "/sd/basic/setup.bat" -> "basic"; a root-level batch -> "". Used to set the
+ * batch cwd (DESIGN.md §8.2) while the batch runs. */
+static void batch_dir_of(const char *abspath, char *buf, size_t len)
+{
+    const char *pfx = SD_MOUNT_POINT "/"; /* "/sd/" */
+    const char *rel = abspath;
+    size_t pl = strlen(pfx);
+    if (strncmp(abspath, pfx, pl) == 0) {
+        rel = abspath + pl;
+    }
+    const char *slash = strrchr(rel, '/'); /* split the filename off the directory */
+    size_t dlen = slash ? (size_t)(slash - rel) : 0;
+    if (dlen >= len) {
+        dlen = len - 1;
+    }
+    memcpy(buf, rel, dlen);
+    buf[dlen] = '\0';
+}
+
+/* Run a resolved path under the nesting guard, with the batch cwd set to the batch's
+ * own folder for its duration (DESIGN.md §8.2). Saving and restoring the cwd across the
+ * recursive call forms the cwd stack: a nested `exec` resolves under its parent's
+ * folder, then the parent's cwd is put back when the child returns. */
 static void batch_exec_path(cli_console_t *c, const char *path)
 {
     if (c->exec_depth >= BATCH_MAX_DEPTH) {
         cli_write(c, "exec: batch files nested too deep\r\n");
         return;
     }
+    char saved[CONFIG_FILE_CAP];
+    snprintf(saved, sizeof saved, "%s", s_batch_cwd);
+    batch_dir_of(path, s_batch_cwd, sizeof s_batch_cwd);
     c->exec_depth++;
     run_batch_file(c, path);
     c->exec_depth--;
+    snprintf(s_batch_cwd, sizeof s_batch_cwd, "%s", saved);
 }
 
 int cli_exec_batch(cli_console_t *c, const char *name)
