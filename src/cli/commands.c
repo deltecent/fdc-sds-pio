@@ -843,21 +843,22 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
     fdc_stats_t s;
     fdc_get_stats(&s);
     cli_printf(c, "FDC+ link: %lu baud\r\n", (unsigned long)fdc_baud());
-    cli_printf(c, "  STAT     %lu\r\n", (unsigned long)s.stat);
-    cli_printf(c, "  READ     %lu\r\n", (unsigned long)s.read);
-    cli_printf(c, "  WRIT     %lu\r\n", (unsigned long)s.writ);
-    cli_printf(c, "  rd-retry %lu\r\n", (unsigned long)s.read_retry);
-    cli_printf(c, "  not-rdy  %lu\r\n", (unsigned long)s.not_ready);
-    cli_printf(c, "  cmd-csum %lu  (bad command header from FDC)\r\n",
-               (unsigned long)s.cmd_csum);
-    cli_printf(c, "  data-csum %lu (bad WRIT track data from FDC)\r\n",
-               (unsigned long)s.data_csum);
-    cli_printf(c, "  cmd-tmo  %lu  (command header truncated)\r\n",
-               (unsigned long)s.cmd_timeout);
-    cli_printf(c, "  data-tmo %lu  (WRIT track data incomplete)\r\n",
-               (unsigned long)s.data_timeout);
-    cli_printf(c, "  unknown  %lu\r\n", (unsigned long)s.unknown);
-    cli_printf(c, "  last     %s\r\n", s.last_op[0] ? s.last_op : "(none)");
+    cli_printf(c, "  %-10s%lu\r\n", "STAT",     (unsigned long)s.stat);
+    cli_printf(c, "  %-10s%lu\r\n", "READ",     (unsigned long)s.read);
+    cli_printf(c, "  %-10s%lu\r\n", "WRIT",     (unsigned long)s.writ);
+    cli_printf(c, "  %-10s%lu\r\n", "rd-retry", (unsigned long)s.read_retry);
+    cli_printf(c, "  %-10s%lu\r\n", "not-rdy",  (unsigned long)s.not_ready);
+    cli_printf(c, "  %-10s%-6lu(bad command header from FDC)\r\n",
+               "cmd-csum", (unsigned long)s.cmd_csum);
+    cli_printf(c, "  %-10s%-6lu(bad WRIT track data from FDC)\r\n",
+               "data-csum", (unsigned long)s.data_csum);
+    cli_printf(c, "  %-10s%-6lu(command header truncated)\r\n",
+               "cmd-tmo", (unsigned long)s.cmd_timeout);
+    cli_printf(c, "  %-10s%-6lu(WRIT track data incomplete)\r\n",
+               "data-tmo", (unsigned long)s.data_timeout);
+    cli_printf(c, "  %-10s%lu\r\n", "unknown",  (unsigned long)s.unknown);
+    cli_printf(c, "  %-10s%s\r\n",  "last",
+               s.last_op[0] ? s.last_op : "(none)");
     return 0;
 }
 
