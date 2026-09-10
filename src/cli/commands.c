@@ -660,7 +660,12 @@ static int cmd_mount(cli_console_t *c, int argc, char **argv)
     }
     esp_err_t err = disk_mount(drive, qname);
     if (err != ESP_OK) {
+        /* disk_mount drops any previous disk on failure; keep the persisted config in
+         * step and say the drive is now empty, so a failed mount can't be mistaken for
+         * the old disk still being in place (even if the error line scrolls past). */
+        config_set_drive(drive, NULL);
         report_mount_err(c, qname, err);
+        cli_printf(c, "drive %d: (empty)\r\n", drive);
         return 1;
     }
     /* Persist the mount so `save` + reboot auto-mounts it (DESIGN.md §7/§12). */
