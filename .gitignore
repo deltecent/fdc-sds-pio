@@ -29,10 +29,6 @@ sdkconfig.*
 managed_components/
 dependencies.lock
 
-# Reference disk images / server zips (~18 MB). Excluded from git for now by owner
-# request; still present on disk as the intended microSD card contents. Revisit later.
-SDCARD/
-
 # Python
 __pycache__/
 *.pyc
