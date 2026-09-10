@@ -611,13 +611,18 @@ esp_err_t disk_mount(int drive, const char *name)
         return remote_configure(drive, name);
     }
 
-    /* Local SD mount: open first, then swap under the lock (fast, no network). */
+    /* Local SD mount: open the new image first, then swap under the lock (fast, no
+     * network). If it can't be opened, still drop whatever was mounted: a failed
+     * `mount` must never silently leave the old disk in place, or the operator may act
+     * on the wrong disk (e.g. format it) believing the new one took. */
     if (!sd_mounted()) {
+        disk_unmount(drive);
         return ESP_ERR_INVALID_STATE;
     }
     disk_backing_t *b = NULL;
     esp_err_t err = local_open(name, &b);
     if (err != ESP_OK) {
+        disk_unmount(drive);
         return err;
     }
 
