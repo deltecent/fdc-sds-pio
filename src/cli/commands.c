@@ -1500,7 +1500,8 @@ static int cmd_update(cli_console_t *c, int argc, char **argv)
         return ota_update_sd(c) == ESP_OK ? 0 : 1;
     }
     if (strcasecmp(argv[1], "ota") == 0) {
-        /* Network OTA from the configured repo, gated on version.txt (§11.1). */
+        /* Network OTA from the configured repo; installs the repo image whatever its
+         * version relative to the running build (§11.1). */
         return ota_update_repo(c) == ESP_OK ? 0 : 1;
     }
     /* Undocumented: `update <url>` flashes an explicit https:// image now (tnfs:// once

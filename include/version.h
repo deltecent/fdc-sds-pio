@@ -10,7 +10,7 @@
 
 #define FDCSDS_VERSION_MAJOR 1
 #define FDCSDS_VERSION_MINOR 0
-#define FDCSDS_VERSION_PATCH 3
+#define FDCSDS_VERSION_PATCH 4
 
 /* Stringize helpers so the numeric parts and the string stay in sync. */
 #define FDCSDS_STR_(x) #x

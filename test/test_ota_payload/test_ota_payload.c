@@ -1,16 +1,17 @@
 /*
  * test_ota_payload.c — host-native guard that the committed ota/ payload is in sync.
  *
- * ota/ ships three files that must all describe the SAME build:
- *   - ota/version.txt   the advertised version (`update ota` fetches it to decide "newer")
- *   - ota/firmware.bin  the app image (flashed at 0x10000; served by update ota/local)
+ * ota/ ships two files that must describe the SAME build:
+ *   - ota/firmware.bin  the app image (flashed at 0x10000; served by update ota/local).
+ *                       `update ota` reads its embedded version directly — no side marker.
  *   - ota/merged.bin    bootloader + partitions + app (flashed at 0x0 for a full install)
  *
- * tools/build-ota.sh regenerates all three from one `pio run`, so they can't disagree
- * within a refresh. This test closes the other gap: after a version bump, if the ota/
- * payload was NOT rebuilt, the version string embedded in the binaries still reads the
- * old value — this test catches that (exactly the 1.0.0-binary-vs-1.0.1-version.txt
- * drift that motivated it) and fails `pio test -e native` until build-ota.sh is re-run.
+ * tools/build-ota.sh regenerates both from one `pio run`, so they can't disagree within
+ * a refresh. This test closes the other gap: after a version bump, if the ota/ payload
+ * was NOT rebuilt, the version string embedded in the binaries still reads the old value
+ * — this test catches that (exactly the stale-binary drift that motivated it) by
+ * comparing the embedded version to version.h, and fails `pio test -e native` until
+ * build-ota.sh is re-run.
  *
  * How the version is read: an ESP-IDF app image carries an esp_app_desc_t right after
  * its 24-byte image header + 8-byte first-segment header, i.e. at offset 0x20 in the
@@ -28,9 +29,8 @@
 
 #include "version.h"
 
-#if !defined(VERSION_TXT_PATH) || !defined(OTA_VERSION_TXT_PATH) || \
-    !defined(OTA_FIRMWARE_PATH) || !defined(OTA_MERGED_PATH)
-#error "define VERSION_TXT_PATH, OTA_VERSION_TXT_PATH, OTA_FIRMWARE_PATH, OTA_MERGED_PATH (see [env:native] build_flags)"
+#if !defined(OTA_FIRMWARE_PATH) || !defined(OTA_MERGED_PATH)
+#error "define OTA_FIRMWARE_PATH, OTA_MERGED_PATH (see [env:native] build_flags)"
 #endif
 
 #define ESP_APP_DESC_MAGIC   0xABCD5432u
@@ -40,29 +40,6 @@
 
 void setUp(void) {}
 void tearDown(void) {}
-
-/* Read the first line of a text file, trimming trailing CR/LF and a leading 'v'. */
-static int read_version_line(const char *path, char *out, size_t cap)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        return -1;
-    }
-    char line[64] = {0};
-    char *got = fgets(line, sizeof line, f);
-    fclose(f);
-    if (!got) {
-        return -1;
-    }
-    line[strcspn(line, "\r\n")] = '\0';
-    const char *p = line;
-    while (*p == ' ' || *p == '\t' || *p == 'v' || *p == 'V') {
-        ++p;
-    }
-    strncpy(out, p, cap - 1);
-    out[cap - 1] = '\0';
-    return 0;
-}
 
 /* Read the esp_app_desc version out of an app image at file offset `app_off`, after
  * checking the esp_app_desc magic word. Returns 0 on success. */
@@ -97,18 +74,6 @@ static int read_embedded_version(const char *path, long app_off, char *out, size
     return 0;
 }
 
-/* ota/version.txt must equal the root version.txt (and thus FDCSDS_VERSION_STRING). */
-static void test_ota_version_txt_matches(void)
-{
-    char root[64], ota[64];
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, read_version_line(VERSION_TXT_PATH, root, sizeof root),
-                                  "could not read version.txt");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, read_version_line(OTA_VERSION_TXT_PATH, ota, sizeof ota),
-                                  "could not read ota/version.txt");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE(root, ota,
-        "ota/version.txt disagrees with version.txt — re-run tools/build-ota.sh");
-}
-
 /* ota/firmware.bin must embed the current version (else the OTA payload is stale). */
 static void test_ota_firmware_embeds_version(void)
 {
@@ -134,7 +99,6 @@ static void test_ota_merged_embeds_version(void)
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_ota_version_txt_matches);
     RUN_TEST(test_ota_firmware_embeds_version);
     RUN_TEST(test_ota_merged_embeds_version);
     return UNITY_END();

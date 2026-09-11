@@ -7,7 +7,19 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versioning starts fresh at 1.0.0 for this from-scratch ESP-IDF rewrite; the old Arduino
 firmware ended at 0.25.
 
-## [1.0.3] - 2026-09-10
+## [1.0.4] - 2026-09-11
+
+### Changed
+
+- Network OTA now reads the update's version from the firmware image itself
+  (`esp_app_desc_t`) instead of a separate `ota/version.txt`, so there is nothing to keep
+  in sync with the binary. The `ota/version.txt` file, its build step, and its drift test
+  are gone; `update ota` reports the repo image's version against the running one.
+- `update local` / `update ota` now install the image whatever its version relative to the
+  running build — newer, older, or identical. The version relation is reported as advice,
+  not enforced as a gate, so an intentional rollback or a same-version reflash to recover a
+  slot is no longer refused as "already up to date". Both paths print the version going on
+  before flashing.
 
 ### Added
 
