@@ -35,55 +35,12 @@
 
 static const char *TAG = "tnfs";
 
-/* ---- protocol constants (from the FujiNet TNFS spec) ----------------------- */
-
-#define TNFS_HDR_LEN     4     /* session(2) + seq(1) + cmd(1) */
-#define TNFS_STATUS_OFF  4     /* status byte in every response */
-#define TNFS_IO_CHUNK    1024  /* max data bytes per READ/WRITE (fits a UDP datagram) */
-#define TNFS_MSG_CAP     (TNFS_HDR_LEN + 4 + TNFS_IO_CHUNK) /* biggest message we handle */
+/* Wire constants (commands, flags, status, framing) are shared with the server in
+ * tnfs_proto.h (via tnfs.h). Only the client-side timing/retry policy is local: a
+ * client retransmits a lost datagram, so it owns the receive timeout and retry count. */
 #define TNFS_RETRIES     3     /* UDP retransmits (also caps the UDP probe before TCP) */
 #define TNFS_UDP_MS      700   /* per-attempt UDP receive timeout */
 #define TNFS_TCP_MS      3000  /* TCP receive timeout */
-
-/* Commands. */
-#define TNFS_MOUNT   0x00
-#define TNFS_UMOUNT  0x01
-#define TNFS_OPENDIR  0x10
-#define TNFS_READDIR  0x11
-#define TNFS_CLOSEDIR 0x12
-#define TNFS_OPENDIRX 0x17
-#define TNFS_READDIRX 0x18
-#define TNFS_READ    0x21
-#define TNFS_WRITE   0x22
-#define TNFS_CLOSE   0x23
-#define TNFS_LSEEK   0x25
-#define TNFS_OPEN    0x29
-
-/* OPEN flags (little-endian bit field). */
-#define TNFS_O_RDONLY 0x0001
-#define TNFS_O_WRONLY 0x0002
-#define TNFS_O_RDWR   0x0003
-#define TNFS_O_CREAT  0x0100
-#define TNFS_O_TRUNC  0x0200
-
-/* Status codes we special-case. */
-#define TNFS_OK      0x00
-#define TNFS_ENOENT  0x02
-#define TNFS_EAGAIN  0x07   /* retry after a little-endian backoff (ms) at offset 5 */
-#define TNFS_EOF     0x21
-
-/* LSEEK whence. */
-#define TNFS_SEEK_SET 0x00
-#define TNFS_SEEK_END 0x02
-
-/* READDIRX per-entry (dirent) flags and reply dir-status flags. */
-#define TNFS_DIRENTRY_DIR  0x01  /* entry is a directory */
-#define TNFS_DIRSTATUS_EOF 0x01  /* last batch: end of directory reached */
-#define TNFS_READDIRX_FIXED 13   /* dirent bytes before the name: flags(1)+size(4)+mtime(4)+ctime(4) */
-
-/* Protocol version we advertise in MOUNT: 1.2, bytes {minor, major} = {0x02, 0x01}. */
-#define TNFS_VER_LO 0x02
-#define TNFS_VER_HI 0x01
 
 struct tnfs_file {
     int      sock;
@@ -99,18 +56,12 @@ struct tnfs_file {
     uint8_t  resp[TNFS_MSG_CAP];
 };
 
-/* ---- little-endian helpers ------------------------------------------------- */
+/* ---- little-endian helpers (thin aliases over the shared tnfs_proto.h ones) - */
 
-static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
-static inline uint32_t rd32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static inline void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
-static inline void wr32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-}
+static inline uint16_t rd16(const uint8_t *p) { return tnfs_rd16(p); }
+static inline uint32_t rd32(const uint8_t *p) { return tnfs_rd32(p); }
+static inline void wr16(uint8_t *p, uint16_t v) { tnfs_wr16(p, v); }
+static inline void wr32(uint8_t *p, uint32_t v) { tnfs_wr32(p, v); }
 
 /* ---- transport ------------------------------------------------------------- */
 

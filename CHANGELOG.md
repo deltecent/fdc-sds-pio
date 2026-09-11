@@ -7,6 +7,26 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versioning starts fresh at 1.0.0 for this from-scratch ESP-IDF rewrite; the old Arduino
 firmware ended at 0.25.
 
+## [1.0.5] - 2026-09-11
+
+### Added
+
+- **TNFS file server** — a read/write TNFS server (UDP :16384) that serves the SD card to
+  a TNFS client, so images can be moved on and off the card without an FTP client. It is
+  additive to the existing FTP server, advertised over mDNS (`_tnfs._udp`), and runs on
+  core 0 off the FDC path. No authentication, so disable it on an untrusted network. Python
+  tools interoperate: a server, [de-tnfsd](https://github.com/deltecent/de-tnfsd), and a
+  client, [de-tnfs](https://github.com/deltecent/de-tnfs).
+- Per-service enable/disable, all on by default and persisted in NVS: `telnetd`, `ftpd`,
+  and `tnfsd` each turn on or off independently (`save`, then `reboot` to apply). None of
+  these services use a password, so they can be shut off individually on public WiFi.
+
+### Changed
+
+- The `telnet` and `ftp` commands are renamed to `telnetd` and `ftpd`, matching `tnfsd` and
+  disambiguating them from the Telnet/FTP *client* sense. The `diag` services line and help
+  text use the new names.
+
 ## [1.0.4] - 2026-09-11
 
 ### Changed

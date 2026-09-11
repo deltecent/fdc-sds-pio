@@ -21,13 +21,11 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "tnfs_proto.h" /* shared wire constants incl. TNFS_DEFAULT_PORT (§9.5/§9.6) */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Default UDP port for TNFS (DESIGN.md §9.5). */
-#define TNFS_DEFAULT_PORT 16384
 
 /* An open remote file over its own dedicated session. Opaque; created by
  * tnfs_open(), released by tnfs_close(). */

@@ -38,6 +38,9 @@ typedef struct {
     uint32_t baud_rate;                       /* FDC+ baud */
     uint8_t  log_level;                       /* console log verbosity, esp_log_level_t (§13) */
     bool     wifi_enabled;                    /* WiFi on/off */
+    bool     telnet_enabled;                  /* Telnet console (:23) on/off (§9.2) */
+    bool     ftp_enabled;                     /* FTP server (:21) on/off (§9.4) */
+    bool     tnfsd_enabled;                   /* TNFS server (:16384) on/off (§9.6) */
     char     wifi_ssid[CONFIG_SSID_CAP];      /* SSID */
     char     wifi_pass[CONFIG_PASS_CAP];      /* password */
     char     wifi_name[CONFIG_NAME_CAP];      /* hostname / device name / prompt */
@@ -81,6 +84,9 @@ esp_err_t config_wipe(void);
 /* Setters copy the value in and mark the config dirty. */
 void config_set_baud(uint32_t baud);
 void config_set_wifi_enabled(bool enabled);
+void config_set_telnet_enabled(bool enabled);
+void config_set_ftp_enabled(bool enabled);
+void config_set_tnfsd_enabled(bool enabled);
 void config_set_log_level(uint8_t level);  /* esp_log_level_t (§13) */
 void config_set_str(config_str_id_t id, const char *val);
 

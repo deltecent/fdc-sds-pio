@@ -23,6 +23,9 @@ static const char *TAG = "config";
 #define KEY_BAUD    "baudRate"
 #define KEY_LOGLVL  "logLevel"
 #define KEY_WIFI_EN "wifiEnabled"
+#define KEY_TELNETEN "telnetEnabled"
+#define KEY_FTP_EN  "ftpEnabled"
+#define KEY_TNFSD_EN "tnfsdEnabled"
 #define KEY_SSID    "wifiSSID"
 #define KEY_PASS    "wifiPass"
 #define KEY_NAME    "wifiName"
@@ -45,6 +48,11 @@ static void set_defaults(void)
      * The `log` command raises it at runtime; net_init/wifi/fdc log at INFO. */
     s_cfg.log_level = ESP_LOG_WARN;
     s_cfg.wifi_enabled = false;
+    /* Network services default ON; they run only while WiFi is up. Disable on an
+     * untrusted network — the Telnet console has no password (§9.2). */
+    s_cfg.telnet_enabled = true;
+    s_cfg.ftp_enabled = true;
+    s_cfg.tnfsd_enabled = true;
     /* ssid/pass empty */
     strcpy(s_cfg.wifi_name, "FDC-SDS-ESP32");
     strcpy(s_cfg.time_zone, "UTC0");
@@ -80,6 +88,15 @@ static void load_from_nvs(nvs_handle_t h)
     }
     if (nvs_get_u8(h, KEY_WIFI_EN, &u8) == ESP_OK) {
         s_cfg.wifi_enabled = (u8 != 0);
+    }
+    if (nvs_get_u8(h, KEY_TELNETEN, &u8) == ESP_OK) {
+        s_cfg.telnet_enabled = (u8 != 0);
+    }
+    if (nvs_get_u8(h, KEY_FTP_EN, &u8) == ESP_OK) {
+        s_cfg.ftp_enabled = (u8 != 0);
+    }
+    if (nvs_get_u8(h, KEY_TNFSD_EN, &u8) == ESP_OK) {
+        s_cfg.tnfsd_enabled = (u8 != 0);
     }
     load_str(h, KEY_SSID, s_cfg.wifi_ssid, sizeof s_cfg.wifi_ssid);
     load_str(h, KEY_PASS, s_cfg.wifi_pass, sizeof s_cfg.wifi_pass);
@@ -154,6 +171,9 @@ esp_err_t config_save(void)
     err = nvs_set_u32(h, KEY_BAUD, s_cfg.baud_rate);
     if (err == ESP_OK) err = nvs_set_u8(h, KEY_LOGLVL, s_cfg.log_level);
     if (err == ESP_OK) err = nvs_set_u8(h, KEY_WIFI_EN, s_cfg.wifi_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, KEY_TELNETEN, s_cfg.telnet_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, KEY_FTP_EN, s_cfg.ftp_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u8(h, KEY_TNFSD_EN, s_cfg.tnfsd_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_SSID, s_cfg.wifi_ssid);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_PASS, s_cfg.wifi_pass);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_NAME, s_cfg.wifi_name);
@@ -214,6 +234,30 @@ void config_set_wifi_enabled(bool enabled)
 {
     if (s_cfg.wifi_enabled != enabled) {
         s_cfg.wifi_enabled = enabled;
+        s_dirty = true;
+    }
+}
+
+void config_set_telnet_enabled(bool enabled)
+{
+    if (s_cfg.telnet_enabled != enabled) {
+        s_cfg.telnet_enabled = enabled;
+        s_dirty = true;
+    }
+}
+
+void config_set_ftp_enabled(bool enabled)
+{
+    if (s_cfg.ftp_enabled != enabled) {
+        s_cfg.ftp_enabled = enabled;
+        s_dirty = true;
+    }
+}
+
+void config_set_tnfsd_enabled(bool enabled)
+{
+    if (s_cfg.tnfsd_enabled != enabled) {
+        s_cfg.tnfsd_enabled = enabled;
         s_dirty = true;
     }
 }

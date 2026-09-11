@@ -342,6 +342,9 @@ v1 schema (namespace `fdcsds`):
 | `baudRate` | u32 | FDC+ baud | `403200` |
 | `logLevel` | u8 | Console log verbosity, `esp_log_level_t` 0–5 *(see §13)* | `2` (warn) |
 | `wifiEnabled` | bool | WiFi on/off | `false` |
+| `telnetEnabled` | bool | Telnet console (:23) on/off *(see §9.2)* | `true` |
+| `ftpEnabled` | bool | FTP server (:21) on/off *(see §9.4)* | `true` |
+| `tnfsdEnabled` | bool | TNFS server (:16384) on/off *(see §9.6)* | `true` |
 | `wifiSSID` | string(≤80) | SSID | empty |
 | `wifiPass` | string(≤80) | password | empty |
 | `wifiName` | string(≤40) | hostname / device name / prompt | `FDC-SDS-ESP32` |
@@ -411,6 +414,9 @@ byte ever leaks into a command line.
 | `hostname` | name | Set device/host name |
 | `ftpuser` | name | Set FTP username (§9.4) |
 | `ftppass` | password | Set FTP password (§9.4) |
+| `telnetd` | — \| ON\|OFF | Show / enable / disable the Telnet console (§9.2); a change is saved and applies after reboot |
+| `ftpd` | — \| ON\|OFF | Show / enable / disable the FTP server (§9.4); a change is saved and applies after reboot |
+| `tnfsd` | — \| ON\|OFF | Show / enable / disable the TNFS server (§9.6); a change is saved and applies after reboot |
 | `reboot` | — | Clean shutdown + restart |
 | `update` | — \| `local` \| `ota` | Firmware: bare = show versions (running/SD/OTA); `local` flashes SD `/firmware.bin`; `ota` = network OTA from `otaRepo` (§11.1) |
 | `version` | — | Firmware version |
@@ -432,8 +438,10 @@ byte ever leaks into a command line.
   `<command> ?` help form. Entering a bad argument may still print a terse `usage:` line.
 - Bounds-check drive numbers as `0..MAX_DRIVE-1` (fix the old `> MAX_DRIVE` off-by-one).
 - The set stays close to the original baseline at the level of command *names*: the new
-  names beyond it are `ftpuser`/`ftppass` (§9.4) and `log` (the console-verbosity knob,
-  §13). Existing commands gained argument forms:
+  names beyond it are `ftpuser`/`ftppass` (§9.4), `log` (the console-verbosity knob,
+  §13), and the service on/off switches `telnetd` (§9.2) / `ftpd` (§9.4) / `tnfsd` (§9.6).
+  Existing commands
+  gained argument forms:
   the `update local`/`update ota` arguments (bare `update` reports version status; a bare
   `update <url>` also works but is undocumented, §11.1), an optional glob `spec` on
   `dir`/`ls` (§8.4), a
@@ -550,6 +558,11 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
 ### 9.2 Network console (minimal Telnet server)
 - TCP :23. On connect, negotiate character mode, print banner + prompt, and route the
   CLI to the socket stream. Serial console stays active concurrently.
+- **Enable flag (`telnetEnabled`, §7; default on).** The console has **no password**, so
+  it is the main exposure on an untrusted/public network; `telnetd off` disables it. The
+  flag is read once at boot (the listener task isn't even created when off, and the
+  `_telnet` mDNS service isn't advertised), so a change is saved with `save` and takes
+  effect on the next **reboot** — the `telnetd` command says so.
 - **A minimal Telnet server, not a raw byte stream.** Earlier this port was a plain
   byte stream that just dropped `IAC` (0xFF); that broke real clients. macOS/BSD
   `telnet` opens by sending option negotiation, and some option *numbers* land in
@@ -588,6 +601,10 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
 
 ### 9.4 FTP server
 - Primary way to move disk images to/from SD over the network. TCP :21, SD storage.
+- **Enable flag (`ftpEnabled`, §7; default on).** `ftpd off` disables the server; like the
+  Telnet console the flag is read once at boot (the task isn't created and the `_ftp`
+  mDNS service isn't advertised when off), so a change is saved with `save` and applies
+  on the next **reboot**.
 - **Credentials — [RESOLVED: configurable in NVS, default `fdc`/`fdc`].** Store
   `ftpUser`/`ftpPass` in NVS (§7), defaulting to `fdc`/`fdc` so nothing breaks out of
   the box; the owner can change them via CLI (`ftpuser`/`ftppass`, §8.1) and `save`.
@@ -619,7 +636,9 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
 - **Protocol.** Default transport **UDP**, default port **16384**; session-based
   (`MOUNT` → session id, then `OPEN`/`LSEEK`/`READ`/`WRITE`/`CLOSE`, `UMOUNT`),
   little-endian, retried datagrams with a sequence byte and per-request timeout/retry.
-  Reference: the FujiNet `tnfsd` server project and its protocol document.
+  Reference: the FujiNet `tnfsd` server project and its protocol document. A simple
+  Python server to test the client against is `deltecent/de-tnfsd`
+  (<https://github.com/deltecent/de-tnfsd>).
 - **TCP fallback [CLAUDE — resolved during M9a].** UDP stays the default, but the client
   **falls back to TCP** on the same port when the UDP `MOUNT` probe times out — many
   hosted `tnfsd` servers (e.g. the AWS-hosted `tnfs.mitsaltair.com` test server) answer
@@ -638,6 +657,87 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
   `net`/CLI side, not inline on `fdc` — see §10.1 for dispatch and timeout bounding.
 - **Availability.** Enabled only when WiFi is up (§9.1); on WiFi drop, remote drives go
   **not-ready** until reconnect, and an in-flight `copy` fails cleanly.
+- **Note on roles.** This is the **client** (we reach out to someone else's server). The
+  reverse — letting another machine reach *our* SD card over TNFS — is the **TNFS server**
+  in §9.6. They share only wire constants; the code is otherwise separate.
+
+### 9.6 TNFS server (serve the SD card) **[RESOLVED: in scope for v1; read/write]**
+
+The opposite role from §9.5: a **read/write TNFS server** that exposes the SD card to the
+network, so images (and any files) can be moved to/from the card from a desktop TNFS
+client without a heavy FTP client. It is **additive — it runs alongside the FTP server
+(§9.4)**, not instead of it. Reference: the FujiNet `tnfsd` server and its protocol doc.
+A Python client to test this server with is `deltecent/de-tnfs`
+(<https://github.com/deltecent/de-tnfs>).
+
+- **Enable flag (`tnfsdEnabled`, §7; default on).** Like `telnetd`/`ftpd` (§9.2/§9.4) the
+  flag is read **once at boot**: the listener task isn't created and the `_tnfs` mDNS
+  service isn't advertised when off. The `tnfsd` command (§8.1) stages a change that is
+  saved with `save` and applies on the next **reboot**. On an untrusted network, turn it
+  off — see authentication below.
+- **Authentication — [CLAUDE — resolved: none; gated by the enable flag].** The TNFS
+  `MOUNT` can carry a user/password, but almost no client sends one and it is plaintext.
+  v1 **ignores** the credential fields and serves any client that can reach the port —
+  the same no-password posture as the Telnet console (§9.2). The security control is the
+  enable flag plus a trusted LAN, *not* TNFS auth. (This is why the owner asked for the
+  switches in the first place.)
+- **Transport — [RESOLVED: UDP-only in v1].** Serve **UDP :16384** only. That is the TNFS
+  default and what every common client (including our own §9.5 client) tries first. TCP
+  serving is more code (per-connection framing, accept loop) for a case our own client
+  only needs as a *fallback* to quirky hosted servers; deferred unless a target client is
+  UDP-incapable.
+- **Root / path jail.** The server roots at the **SD card**. A client's `MOUNT`
+  mountpoint resolves under `/sd` through the same root-confinement as `sd_path()` (§10):
+  `..`, absolute escapes and empty components are rejected, so a client can never read or
+  write outside the card. `MOUNT /` serves the SD root; `MOUNT /cpm` serves `/sd/cpm`.
+  All per-request paths are likewise confined.
+- **Sessions & handles — [RESOLVED: bounds].** One UDP socket; clients are distinguished by
+  source address + the session id the server allocates in the `MOUNT` reply. Bounds are
+  small (this is a staging tool, not a fileserver): **≤2 concurrent sessions**, and per
+  session **≤4 open files + ≤2 open directories**. A session is reaped after a fixed
+  **idle timeout of ≈30 s** so a client that quits without `UMOUNT` can't leak handles;
+  reaping closes any files it left open. (The `MOUNT` reply advertises a min-retry
+  timeout *to* the client; the request carries no timeout of its own.) `MOUNT` over the
+  session cap is refused with a busy/again status.
+- **Idempotent retransmit handling — the key risk [CLAUDE — called out, to validate].**
+  TNFS is sequence-numbered datagrams: the client retransmits the *same* request (same
+  sequence byte) when a reply is lost. The server must therefore **cache each session's
+  last reply** and, on a duplicate sequence number, **re-send the cached reply without
+  re-executing** the operation. This matters most for non-idempotent ops — a replayed
+  `WRITE`, `UNLINK`, `MKDIR` or `RENAME` must not run twice. Cache one in-flight
+  request/reply per session keyed on its sequence byte; a new sequence number retires the
+  previous cache entry. This is the first thing the on-hardware test must exercise (force
+  a dropped reply and confirm the retransmit is a no-op replay).
+- **Opcode set (read/write).** Enough to browse and move files both directions:
+  - session: `MOUNT` (0x00) → allocates session id + replies version/min-retry;
+    `UMOUNT` (0x01).
+  - files: `OPEN` (0x29, with the `O_*` flags in `tnfs.h` — `CREAT`/`TRUNC`/`RDWR` for
+    writing), `READ` (0x21), `WRITE` (0x22), `CLOSE` (0x23), `LSEEK` (0x25),
+    `STAT` (0x24).
+  - directories: `OPENDIR` (0x10) / `READDIR` (0x11) / `CLOSEDIR` (0x12) and the extended
+    `OPENDIRX` (0x17) / `READDIRX` (0x18) so a client sees sizes and the dir/file flag.
+  - mutating: `MKDIR` (0x13), `RMDIR` (0x14), `UNLINK` (0x26), `RENAME` (0x28).
+  - `CHMOD` (0x27) is accepted and **no-ops with success** (FAT has no POSIX modes).
+  Data payloads use the same **1024-byte** `READ`/`WRITE` chunk cap the client uses
+  (`TNFS_IO_CHUNK`), so each datagram maps to one short SD operation.
+- **Shared SD — same discipline as FTP (§9.4 / §5.2).** The server runs on **core 0, off
+  the core-1 `fdc` task**, and does its file/dir I/O straight through the **FATFS VFS**,
+  exactly like FTP. Concurrency with fdc track I/O is left to the FATFS/SD layer (FATFS is
+  reentrant; FTP already proves a second writer coexists with the FDC path) — the server
+  does **not** take the `disk` module's track-buffer mutex, which guards only that buffer
+  and the mounted images. Each `READ`/`WRITE` is a bounded ≤1 KB op, and the network wait
+  (`recvfrom`) is never inside an open file operation. Writing the card while a drive is
+  mounted from it is the owner's call, exactly as with FTP today.
+- **Module & wiring.** New `net/tnfs_server` (`src/net/tnfs_server.c` +
+  `include/tnfs_server.h`) exposing `net_tnfsd_start()` in the mold of `net_ftp_start()`
+  (§9.4): a link-gated task on core 0, started from `net_init()` only when
+  `tnfsdEnabled` (flag read once, reboot to change), advertising `_tnfs._udp` on :16384
+  via mDNS when enabled. Wire constants/status codes/endianness are **shared** with the
+  client by lifting the `#define`s that were private to `tnfs.c` into
+  `include/tnfs_proto.h`; the two modules otherwise share no code (client initiates,
+  server listens).
+- **Availability.** Only while WiFi is up (§9.1), like FTP; the task blocks on the
+  connected bit and drops its sessions on a WiFi drop.
 
 ---
 
