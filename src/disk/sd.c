@@ -21,6 +21,40 @@ static const char *TAG = "sd";
 static sdmmc_card_t *s_card;
 static bool          s_mounted;
 
+/*
+ * Tolerate cards that reject CMD59 (CRC_ON_OFF) during SPI init.
+ *
+ * IDF's sdmmc init runs sdmmc_init_spi_crc() unconditionally in SPI mode to turn
+ * on CRC checking (CMD59). Some cards — including the 4 MB/4 GB cards that work
+ * fine with the old Arduino firmware — answer CMD59 with the illegal-command bit,
+ * which surfaces as ESP_ERR_NOT_SUPPORTED (0x106) and aborts the whole mount:
+ *
+ *   sdmmc_init_spi_crc: sdmmc_send_cmd_crc_on_off returned 0x106
+ *   sdmmc_card_init failed (0x106)
+ *
+ * IDF 5.4 exposes no Kconfig/host flag to skip that step. The Arduino SD library's
+ * SPI diskio never enables CRC at all (CRC16 is optional in SPI mode per the SD
+ * spec), which is why those cards mount there. We match that: wrap the init step
+ * and issue CMD59 ourselves, so a rejection just leaves CRC off and init proceeds.
+ * Cards that accept CMD59 keep CRC on as before.
+ *
+ * We deliberately do NOT call the real sdmmc_init_spi_crc() (via __real_*): its own
+ * ESP_LOGE prints an alarming "returned 0x106" line on every boot with these cards.
+ * Sending CMD59 directly skips that log; no lower layer logs at error/warning level
+ * for a plain illegal-command R1 response (that path is ESP_LOGD, off by default),
+ * so a card that lacks CRC support now mounts with a clean console.
+ */
+esp_err_t sdmmc_send_cmd_crc_on_off(sdmmc_card_t *card, bool crc_enable);
+esp_err_t __wrap_sdmmc_init_spi_crc(sdmmc_card_t *card)
+{
+    esp_err_t err = sdmmc_send_cmd_crc_on_off(card, true);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "card does not support CMD59/CRC_ON_OFF (%s); continuing "
+                      "with SPI CRC off", esp_err_to_name(err));
+    }
+    return ESP_OK;
+}
+
 esp_err_t sd_mount(void)
 {
     if (s_mounted) {
