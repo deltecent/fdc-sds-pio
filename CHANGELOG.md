@@ -7,6 +7,19 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versioning starts fresh at 1.0.0 for this from-scratch ESP-IDF rewrite; the old Arduino
 firmware ended at 0.25.
 
+## [1.0.6] - 2026-09-11
+
+### Fixed
+
+- **SD cards that reject CMD59 (CRC_ON_OFF) now mount.** ESP-IDF's SPI SD init
+  unconditionally enables CRC checking with CMD59; some cards — including 4 GB cards
+  that mount fine under the old Arduino firmware — answer CMD59 with the illegal-command
+  bit, which surfaced as `ESP_ERR_NOT_SUPPORTED` (0x106) and aborted the entire mount
+  (`sdmmc_card_init failed (0x106)`), leaving file commands unavailable. CRC16 is optional
+  in SPI mode, so a CMD59 rejection is now tolerated: the card mounts with SPI CRC off,
+  matching the Arduino SD driver. Cards that accept CMD59 keep CRC on, and the console
+  no longer prints the `sdmmc_sd` error on boot.
+
 ## [1.0.5] - 2026-09-11
 
 ### Added
