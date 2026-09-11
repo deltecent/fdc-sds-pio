@@ -19,7 +19,7 @@ pio device monitor -b 115200   # serial console
 - Protocol & hardware reference: <https://deramp.com/downloads/altair/hardware/fdc+/>
 - Prebuilt binaries (no toolchain needed): **[Releases](https://github.com/deltecent/fdc-sds-pio/releases/latest)**
   — each tag attaches `merged.bin` (full flash, offset `0x0`) and `firmware.bin` (app / OTA
-  image). Current release: **[1.0.4](https://github.com/deltecent/fdc-sds-pio/releases/tag/1.0.4)**.
+  image). Current release: **[1.0.5](https://github.com/deltecent/fdc-sds-pio/releases/tag/1.0.5)**.
 
 ## What's different from the Arduino firmware
 
@@ -58,6 +58,13 @@ so it drops in where the old one was — but the foundation and the feature set 
   `fdc` / `fdc`, and WPA2 is required whenever a password is set.
 - **Remote disk images** — mount and `copy` over **TNFS**, and `copy` from an `http(s)://`
   URL. Neither existed before.
+- **TNFS file server** — serve the SD card **read/write** to a TNFS client (UDP :16384),
+  so you can move images on and off the card without an FTP client. Python tools are
+  available: a server, [de-tnfsd](https://github.com/deltecent/de-tnfsd), and a client,
+  [de-tnfs](https://github.com/deltecent/de-tnfs).
+- **Turn services off independently** — `telnetd`, `ftpd`, and `tnfsd` each enable/disable
+  on their own (all on by default). None of them use a password, so disable what you
+  don't need on public/untrusted WiFi.
 
 **Storage & CLI**
 
@@ -133,6 +140,7 @@ The prompt is the host name; a leading `* ` means the config has unsaved edits.
 | `ssid` / `pass` | Set WiFi credentials |
 | `hostname` `<name>` | Set the device/host name |
 | `ftpuser` / `ftppass` | Set FTP credentials |
+| `telnetd` / `ftpd` / `tnfsd` `[on\|off]` | Show / enable / disable each network service (applies after `save` + `reboot`) |
 | `time` / `date`, `tz` | Show the clock; set the timezone (`tz ?` lists US zones) |
 | `update` `[local\|ota]` | Firmware update (§ below) |
 | `save` / `write`, `wipe` | Persist config to NVS / erase it and reload defaults |
@@ -186,9 +194,12 @@ reboot
 ```
 
 On connect the device advertises `<hostname>.local` (mDNS), syncs the clock over NTP,
-and starts the Telnet console (:23) and an FTP server (default login `fdc` / `fdc`,
-changeable with `ftpuser` / `ftppass`). Upload `.dsk` images straight to the SD card
-over FTP.
+and starts three services: the Telnet console (:23), an FTP server (:21, default login
+`fdc` / `fdc`, changeable with `ftpuser` / `ftppass`), and a **read/write TNFS server**
+(UDP :16384). Upload `.dsk` images straight to the SD card over FTP, or over TNFS with a
+client such as [de-tnfs](https://github.com/deltecent/de-tnfs). Each service can be
+turned off on its own (`telnetd` / `ftpd` / `tnfsd` `off`, then `save` + `reboot`) —
+useful on public WiFi, since none of them use a password.
 
 Once WiFi is up, `copy` can also stage images without a separate client:
 
@@ -199,7 +210,8 @@ copy https://example.com/disks/CPM22.DSK CPM22.DSK        # pull from a web serv
 
 A `tnfs://` endpoint works as either the source or the destination; an `http(s)://` URL
 is a source only (HTTP has no upload path), and `https://` is verified against the
-bundled CA roots.
+bundled CA roots. Need a TNFS server to `copy` to or from? [de-tnfsd](https://github.com/deltecent/de-tnfsd)
+is a small Python one.
 
 ## Firmware update (OTA)
 

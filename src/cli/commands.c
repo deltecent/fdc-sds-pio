@@ -74,6 +74,9 @@ static int cmd_tz(cli_console_t *c, int argc, char **argv);
 static int cmd_logout(cli_console_t *c, int argc, char **argv);
 static int cmd_ftpuser(cli_console_t *c, int argc, char **argv);
 static int cmd_ftppass(cli_console_t *c, int argc, char **argv);
+static int cmd_telnetd(cli_console_t *c, int argc, char **argv);
+static int cmd_ftpd(cli_console_t *c, int argc, char **argv);
+static int cmd_tnfsd(cli_console_t *c, int argc, char **argv);
 static int cmd_update(cli_console_t *c, int argc, char **argv);
 static int cmd_exec(cli_console_t *c, int argc, char **argv);
 
@@ -165,6 +168,20 @@ static const char D_ftpuser[] =
 static const char D_ftppass[] =
     "The stored password is never shown. Takes effect on the next FTP connection.\r\n"
     "usage: ftppass <password>\r\n";
+static const char D_telnetd[] =
+    "Turns the network console (Telnet, port 23) on or off. The console has no\r\n"
+    "password, so turn it off on an untrusted network. Save the change with\r\n"
+    "'save'; it takes effect after a reboot.\r\n"
+    "usage: telnetd [on | off]   (with no argument, shows whether it is enabled)\r\n";
+static const char D_ftpd[] =
+    "Turns the FTP server (port 21) on or off. Save the change with 'save'; it\r\n"
+    "takes effect after a reboot. Set the login with 'ftpuser' / 'ftppass'.\r\n"
+    "usage: ftpd [on | off]      (with no argument, shows whether it is enabled)\r\n";
+static const char D_tnfsd[] =
+    "Turns the TNFS server (UDP port 16384) on or off. It serves the SD card\r\n"
+    "read/write to a TNFS client, with no password, so turn it off on an untrusted\r\n"
+    "network. Save the change with 'save'; it takes effect after a reboot.\r\n"
+    "usage: tnfsd [on | off]     (with no argument, shows whether it is enabled)\r\n";
 static const char D_update[] =
     "usage: update [local | ota]\r\n"
     "  update            show the running, SD-card, and available versions\r\n"
@@ -230,6 +247,9 @@ static const cli_command_t k_commands[] = {
     { "ssid",     NULL,     "Show or set the WiFi network name",   cmd_ssid,   D_ssid     },
     { "pass",     NULL,     "Set the WiFi password",               cmd_pass,   D_pass     },
     { "hostname", NULL,     "Show or set the device name",         cmd_hostname, D_hostname },
+    { "telnetd",  NULL,     "Enable or disable the Telnet console", cmd_telnetd, D_telnetd },
+    { "ftpd",     NULL,     "Enable or disable the FTP server",    cmd_ftpd,   D_ftpd     },
+    { "tnfsd",    NULL,     "Enable or disable the TNFS server",   cmd_tnfsd,  D_tnfsd    },
     { "ftpuser",  NULL,     "Show or set the FTP username",        cmd_ftpuser, D_ftpuser },
     { "ftppass",  NULL,     "Set the FTP password",                cmd_ftppass, D_ftppass },
     { "update",   NULL,     "Show versions, or install an update", cmd_update, D_update   },
@@ -1410,6 +1430,76 @@ static int cmd_ftppass(cli_console_t *c, int argc, char **argv)
     return 0;
 }
 
+/* ---- network service on/off (DESIGN.md §7/§9.2/§9.4) ----------------------- *
+ * Each service starts at boot only when its flag is set (net_init reads it once),
+ * so a change here is staged in config and takes effect after save + reboot. */
+
+static int cmd_telnetd(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_printf(c, "Telnet console is %s\r\n",
+                   config_get()->telnet_enabled ? "enabled" : "disabled");
+        return 0;
+    }
+    bool on;
+    if (strcasecmp(argv[1], "on") == 0) {
+        on = true;
+    } else if (strcasecmp(argv[1], "off") == 0) {
+        on = false;
+    } else {
+        cli_write(c, "usage: telnetd [on|off]\r\n");
+        return 1;
+    }
+    config_set_telnet_enabled(on);
+    cli_printf(c, "Telnet console %s (save, then reboot to apply)\r\n",
+               on ? "enabled" : "disabled");
+    return 0;
+}
+
+static int cmd_ftpd(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_printf(c, "FTP server is %s\r\n",
+                   config_get()->ftp_enabled ? "enabled" : "disabled");
+        return 0;
+    }
+    bool on;
+    if (strcasecmp(argv[1], "on") == 0) {
+        on = true;
+    } else if (strcasecmp(argv[1], "off") == 0) {
+        on = false;
+    } else {
+        cli_write(c, "usage: ftpd [on|off]\r\n");
+        return 1;
+    }
+    config_set_ftp_enabled(on);
+    cli_printf(c, "FTP server %s (save, then reboot to apply)\r\n",
+               on ? "enabled" : "disabled");
+    return 0;
+}
+
+static int cmd_tnfsd(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        cli_printf(c, "TNFS server is %s\r\n",
+                   config_get()->tnfsd_enabled ? "enabled" : "disabled");
+        return 0;
+    }
+    bool on;
+    if (strcasecmp(argv[1], "on") == 0) {
+        on = true;
+    } else if (strcasecmp(argv[1], "off") == 0) {
+        on = false;
+    } else {
+        cli_write(c, "usage: tnfsd [on|off]\r\n");
+        return 1;
+    }
+    config_set_tnfsd_enabled(on);
+    cli_printf(c, "TNFS server %s (save, then reboot to apply)\r\n",
+               on ? "enabled" : "disabled");
+    return 0;
+}
+
 static int cmd_time(cli_console_t *c, int argc, char **argv)
 {
     (void)argc;
@@ -1755,6 +1845,10 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "FTP user:  %s (password %s)\r\n",
                cfg->ftp_user[0] ? cfg->ftp_user : "(unset)",
                cfg->ftp_pass[0] ? "set" : "unset");
+    cli_printf(c, "Services:  telnetd %s, ftpd %s, tnfsd %s\r\n",
+               cfg->telnet_enabled ? "on" : "off",
+               cfg->ftp_enabled ? "on" : "off",
+               cfg->tnfsd_enabled ? "on" : "off");
     cli_printf(c, "OTA repo:  %s\r\n", cfg->ota_repo[0] ? cfg->ota_repo : "(unset)");
 
     /* -- WiFi -- */

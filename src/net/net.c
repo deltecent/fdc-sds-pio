@@ -27,6 +27,8 @@
 #include "config.h"
 #include "disk.h"
 #include "ftp.h"
+#include "tnfs_proto.h" /* TNFS_DEFAULT_PORT for the mDNS advert (§9.6) */
+#include "tnfs_server.h"
 
 static const char *TAG = "net";
 
@@ -235,27 +237,52 @@ esp_err_t net_init(void)
         return err;
     }
 
-    /* mDNS: advertise <wifiName>.local + the telnet and FTP services (DESIGN.md
-     * §9.1). Harmless on a LAN without mDNS. */
+    const config_t *cfg = config_get();
+
+    /* mDNS: advertise <wifiName>.local + the enabled services (DESIGN.md §9.1).
+     * Harmless on a LAN without mDNS. A disabled service is not advertised. */
     if (mdns_init() == ESP_OK) {
         s_mdns_inited = true;
-        mdns_hostname_set(config_get()->wifi_name);
+        mdns_hostname_set(cfg->wifi_name);
         mdns_instance_name_set("FDC+ Serial Disk Server");
-        mdns_service_add(NULL, "_telnet", "_tcp", NET_CONSOLE_PORT, NULL, 0);
-        mdns_service_add(NULL, "_ftp", "_tcp", 21, NULL, 0); /* FTP server (§9.4) */
+        if (cfg->telnet_enabled) {
+            mdns_service_add(NULL, "_telnet", "_tcp", NET_CONSOLE_PORT, NULL, 0);
+        }
+        if (cfg->ftp_enabled) {
+            mdns_service_add(NULL, "_ftp", "_tcp", 21, NULL, 0); /* FTP server (§9.4) */
+        }
+        if (cfg->tnfsd_enabled) {
+            mdns_service_add(NULL, "_tnfs", "_udp", TNFS_DEFAULT_PORT, NULL, 0); /* §9.6 */
+        }
     } else {
         ESP_LOGW(TAG, "mDNS init failed (name discovery unavailable)");
     }
 
     /* Serve the TCP console + FTP whenever the link is up (tasks block until
-     * connected). Both live on core 0, off the FDC path (DESIGN.md §5.2). */
-    net_console_start();
-    if (net_ftp_start() != ESP_OK) {
-        ESP_LOGW(TAG, "FTP task not started (out of memory)");
+     * connected). Both live on core 0, off the FDC path (DESIGN.md §5.2). Each
+     * runs only when enabled in config; the flag is read once here, so a toggle
+     * takes effect on the next reboot (DESIGN.md §7/§9.2). */
+    if (cfg->telnet_enabled) {
+        net_console_start();
+    } else {
+        ESP_LOGI(TAG, "Telnet console disabled in config");
+    }
+    if (cfg->ftp_enabled) {
+        if (net_ftp_start() != ESP_OK) {
+            ESP_LOGW(TAG, "FTP task not started (out of memory)");
+        }
+    } else {
+        ESP_LOGI(TAG, "FTP server disabled in config");
+    }
+    if (cfg->tnfsd_enabled) {
+        if (net_tnfsd_start() != ESP_OK) {
+            ESP_LOGW(TAG, "TNFS server task not started (out of memory)");
+        }
+    } else {
+        ESP_LOGI(TAG, "TNFS server disabled in config");
     }
 
     /* Start connecting now if enabled and configured (DESIGN.md §12 step 9). */
-    const config_t *cfg = config_get();
     if (cfg->wifi_enabled && cfg->wifi_ssid[0]) {
         err = net_wifi_enable(true);
         if (err != ESP_OK) {
