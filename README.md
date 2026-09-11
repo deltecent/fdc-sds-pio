@@ -19,7 +19,56 @@ pio device monitor -b 115200   # serial console
 - Protocol & hardware reference: <https://deramp.com/downloads/altair/hardware/fdc+/>
 - Prebuilt binaries (no toolchain needed): **[Releases](https://github.com/deltecent/fdc-sds-pio/releases/latest)**
   — each tag attaches `merged.bin` (full flash, offset `0x0`) and `firmware.bin` (app / OTA
-  image). Current release: **[1.0.2](https://github.com/deltecent/fdc-sds-pio/releases/tag/1.0.2)**.
+  image). Current release: **[1.0.4](https://github.com/deltecent/fdc-sds-pio/releases/tag/1.0.4)**.
+
+## What's different from the Arduino firmware
+
+This is a ground-up rewrite of the original
+[Arduino `fdc-sds-esp32`](https://github.com/deltecent/fdc-sds-esp32) firmware (which
+ended at 0.25). It keeps the same FDC+ wire protocol, pin map, and DOS-like command style,
+so it drops in where the old one was — but the foundation and the feature set have moved on.
+
+**Platform & timing**
+
+- **Native ESP-IDF, built with PlatformIO** — no Arduino IDE, board manager, or
+  third-party Arduino libraries (SimpleCLI, ESP Telnet, SimpleFTPServer). The build is a
+  reproducible one-line `pio run`.
+- **FreeRTOS tasks instead of one `loop()`.** The FDC+ serial task is pinned to core 1 and
+  isolated from WiFi, the CLI, and FTP, so the FDC's ~1 s command timing holds even during
+  network traffic or a large `copy` — the old single cooperative loop had to pump the FDC
+  by hand to avoid stalls.
+- **32-bit offsets/sizes** throughout (the old code used `int`), and real module boundaries
+  with headers.
+
+**Firmware updates**
+
+- **Over-the-network OTA from GitHub** (`update ota`, HTTPS) in addition to SD-card updates
+  (`update local`). The old firmware could only flash `/update.bin` from the SD card.
+- **Dual-OTA, rollback-safe** — a failed or interrupted update never overwrites the running
+  firmware. The version is read from the image itself, so you can roll back or re-flash a
+  slot on purpose.
+- A **prebuilt merged image and a bundled cross-platform flasher** (Python, no toolchain)
+  for a new or blank board.
+
+**Networking**
+
+- **mDNS** — reach the board at `<hostname>.local` instead of chasing its IP.
+- **Timezone-aware clock** (`tz`) over NTP; the old firmware's NTP was UTC-only.
+- **Configurable FTP credentials** (`ftpuser` / `ftppass`) instead of a hardcoded
+  `fdc` / `fdc`, and WPA2 is required whenever a password is set.
+- **Remote disk images** — mount and `copy` over **TNFS**, and `copy` from an `http(s)://`
+  URL. Neither existed before.
+
+**Storage & CLI**
+
+- **Subdirectories** on the SD card — `mkdir` / `rmdir`, `dir` descends into folders, and
+  disk-set folders are self-contained and relocatable (a batch file runs from its own
+  directory). The old firmware was flat-root only.
+- **`diag`** one-shot status report, and FDC+ statistics split by transaction source.
+
+Moving a board from the Arduino firmware to this one is a one-time USB flash (the partition
+table and NVS format differ). See the wiki
+[Firmware](https://github.com/deltecent/fdc-sds-pio/wiki/Firmware) page.
 
 ## Hardware
 
