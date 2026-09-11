@@ -158,8 +158,10 @@ bundled CA roots.
   (when WiFi is up) the version offered by the update repo. Installs nothing.
 - `update local` — flash `/firmware.bin` from the SD card into the standby slot and
   reboot into it.
-- `update ota` — fetch the repo's `ota/version.txt`, and if it is newer than the running
-  build, stream in `ota/firmware.bin` over HTTPS and reboot.
+- `update ota` — stream in the repo's `ota/firmware.bin` over HTTPS and reboot. It reports
+  the version embedded in that image against the running build (newer, older, or the same)
+  and then installs it either way — so you can roll back or re-flash the current version on
+  purpose; it is never blocked for "already up to date".
 
 The device carries two app slots (dual-OTA partition table), so a failed or interrupted
 update leaves the running firmware intact.

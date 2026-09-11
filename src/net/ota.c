@@ -7,7 +7,8 @@
  *
  * Three sources feed one writer:
  *   - SD    `update local`   via esp_ota_ops (read /sd/firmware.bin, write inactive slot)
- *   - repo  `update ota`     via esp_https_ota, after a version.txt gate
+ *   - repo  `update ota`     via esp_https_ota (reads the image's embedded version to
+ *                            report it, then installs it regardless — see do_https)
  *   - url   `update <url>`   via esp_https_ota (https), or the M9 TNFS client (tnfs)
  *
  * Network transfers pull raw files from the configured GitHub repo (`otaRepo`, §7) on
@@ -20,8 +21,8 @@
  * FDC-critical core 1. The invoking CLI task blocks on a completion semaphore while the
  * OTA task streams progress to that console. A portMUX flag makes updates single-flight
  * (serial and TCP consoles can't flash the same slot at once). On success the OTA task
- * reboots into the new slot itself, so the public calls return only on failure or a
- * no-op (repo already current).
+ * reboots into the new slot itself, so an install call returns only on failure; bare
+ * `update` (status) returns normally without rebooting.
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -119,57 +120,61 @@ static bool version_newer(int maj, int min, int pat)
     return pat > FDCSDS_VERSION_PATCH;
 }
 
-/* HTTP GET a small text body into `out` (NUL-terminated, truncated to cap-1). Uses
- * esp_http_client_perform so redirects are followed. Reports failures to the console. */
-typedef struct { char *buf; int cap; int len; } http_text_t;
-
-static esp_err_t http_text_evt(esp_http_client_event_t *e)
+/* One-word description of how maj.min.pat relates to the running firmware — an advisory
+ * for the operator, never a gate: `update` installs whichever way this reads. */
+static const char *version_relation(int maj, int min, int pat)
 {
-    if (e->event_id == HTTP_EVENT_ON_DATA && e->user_data) {
-        http_text_t *t = (http_text_t *)e->user_data;
-        int n = e->data_len;
-        if (n > t->cap - 1 - t->len) {
-            n = t->cap - 1 - t->len;
-        }
-        if (n > 0) {
-            memcpy(t->buf + t->len, e->data, (size_t)n);
-            t->len += n;
-        }
+    if (maj == FDCSDS_VERSION_MAJOR && min == FDCSDS_VERSION_MINOR &&
+        pat == FDCSDS_VERSION_PATCH) {
+        return "same version";
     }
-    return ESP_OK;
+    return version_newer(maj, min, pat) ? "newer" : "older";
 }
 
-static esp_err_t http_get_text(cli_console_t *c, const char *url, char *out, size_t cap)
+/* Read the version string embedded in a remote https image WITHOUT downloading it:
+ * esp_https_ota_begin pulls just the image header, from which esp_https_ota_get_img_desc
+ * lifts the esp_app_desc_t; we then abort before any of the body streams. Used for the
+ * bare-`update` status line (a few hundred bytes on the wire, not the whole ~1 MB image). */
+static esp_err_t https_image_version(const char *url, char *out, size_t cap)
 {
-    http_text_t ctx = { out, (int)cap, 0 };
-    esp_http_client_config_t cfg = {
+    esp_http_client_config_t http = {
         .url               = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms        = OTA_HTTP_TIMEOUT_MS,
-        .event_handler     = http_text_evt,
-        .user_data         = &ctx,
+        .keep_alive_enable = true,
     };
-    esp_http_client_handle_t cl = esp_http_client_init(&cfg);
-    if (!cl) {
-        return ESP_ERR_NO_MEM;
-    }
-    esp_err_t err = esp_http_client_perform(cl);
-    int status = esp_http_client_get_status_code(cl);
-    esp_http_client_cleanup(cl);
-
+    esp_https_ota_config_t cfg = { .http_config = &http };
+    esp_https_ota_handle_t h = NULL;
+    esp_err_t err = esp_https_ota_begin(&cfg, &h);
     if (err != ESP_OK) {
-        cli_printf(c, "fetch %s: %s\r\n", OTA_DIR "/version.txt", esp_err_to_name(err));
         return err;
     }
-    if (status != 200) {
-        cli_printf(c, "version.txt: HTTP %d\r\n", status);
-        return ESP_FAIL;
+    esp_app_desc_t desc;
+    err = esp_https_ota_get_img_desc(h, &desc);
+    if (err == ESP_OK) {
+        strlcpy(out, desc.version, cap);
     }
-    out[ctx.len] = '\0';
-    return ESP_OK;
+    esp_https_ota_abort(h);
+    return err;
 }
 
 /* ---- the three sources ----------------------------------------------------- */
+
+/* Defined below (status section); used here to show what `update local` is installing. */
+static bool image_file_version(const char *path, char *out, size_t cap);
+
+/* Print "running X, image Y (relation)" for an image we're about to flash, so every
+ * install path — SD and network alike — announces the version going on before it does. */
+static void report_install_version(cli_console_t *c, const char *embedded)
+{
+    int maj, min, pat;
+    if (parse_semver(embedded, &maj, &min, &pat)) {
+        cli_printf(c, "running %s, image %s (%s)\r\n", FDCSDS_VERSION_STRING, embedded,
+                   version_relation(maj, min, pat));
+    } else {
+        cli_printf(c, "running %s, image %s\r\n", FDCSDS_VERSION_STRING, embedded);
+    }
+}
 
 /* Read `/sd/firmware.bin` into the inactive slot, delete it, set it bootable. */
 static esp_err_t do_sd(ota_job_t *j)
@@ -188,6 +193,12 @@ static esp_err_t do_sd(ota_job_t *j)
     if (st.st_size <= 0) {
         cli_printf(c, "%s is empty\r\n", OTA_SD_NAME);
         return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* Announce the version we're about to flash (best-effort; installs either way). */
+    char ver[32];
+    if (image_file_version(OTA_SD_PATH, ver, sizeof ver)) {
+        report_install_version(c, ver);
     }
 
     FILE *f = fopen(OTA_SD_PATH, "rb");
@@ -291,6 +302,16 @@ static esp_err_t do_https(ota_job_t *j, const char *url)
         return err;
     }
 
+    /* Report the incoming image's embedded version against the running one, then install
+     * it regardless (newer/older/same) — the operator asked to update, and a rollback or
+     * a same-version reflash to recover a slot is a deliberate use, not a mistake. The
+     * descriptor read is best-effort: a non-ESP-IDF image just skips the line and the
+     * later esp_ota_end/finish validation catches a genuinely bad image. */
+    esp_app_desc_t desc;
+    if (esp_https_ota_get_img_desc(handle, &desc) == ESP_OK) {
+        report_install_version(c, desc.version);
+    }
+
     int total = esp_https_ota_get_image_size(handle);
     if (total > 0) {
         cli_printf(c, "downloading %d bytes...\r\n", total);
@@ -325,7 +346,9 @@ static esp_err_t do_https(ota_job_t *j, const char *url)
     return ESP_OK;
 }
 
-/* `update ota`: gate on version.txt, then pull the release binary if it is newer. */
+/* `update ota`: stream the repo's release binary in. do_https reads and reports the
+ * image's embedded version but installs it whatever the relation to the running build —
+ * no "newer only" gate (the operator asked; rollback / same-version reflash are valid). */
 static esp_err_t do_repo(ota_job_t *j)
 {
     cli_console_t *c = j->c;
@@ -338,28 +361,6 @@ static esp_err_t do_repo(ota_job_t *j)
     if (!cfg->ota_repo[0]) {
         cli_write(c, "no OTA repo configured (otaRepo empty)\r\n");
         return ESP_ERR_INVALID_STATE;
-    }
-
-    char vurl[OTA_URL_MAX];
-    snprintf(vurl, sizeof vurl, OTA_RAW_HOST "/%s/" OTA_BRANCH "/" OTA_DIR "/version.txt",
-             cfg->ota_repo);
-
-    char text[32];
-    esp_err_t err = http_get_text(c, vurl, text, sizeof text);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    int maj, min, pat;
-    if (!parse_semver(text, &maj, &min, &pat)) {
-        cli_printf(c, "unrecognized version.txt: '%s'\r\n", text);
-        return ESP_FAIL;
-    }
-
-    cli_printf(c, "running %s, latest %d.%d.%d\r\n", FDCSDS_VERSION_STRING, maj, min, pat);
-    if (!version_newer(maj, min, pat)) {
-        cli_write(c, "already up to date\r\n");
-        return ESP_OK; /* no reboot: j->reboot stays false */
     }
 
     char burl[OTA_URL_MAX];
@@ -440,21 +441,22 @@ static void report_ota(cli_console_t *c)
         return;
     }
 
-    char vurl[OTA_URL_MAX];
-    snprintf(vurl, sizeof vurl, OTA_RAW_HOST "/%s/" OTA_BRANCH "/" OTA_DIR "/version.txt",
+    char burl[OTA_URL_MAX];
+    snprintf(burl, sizeof burl, OTA_RAW_HOST "/%s/" OTA_BRANCH "/" OTA_DIR "/" OTA_BIN,
              cfg->ota_repo);
-    char text[32];
-    if (http_get_text(c, vurl, text, sizeof text) != ESP_OK) {
-        return; /* http_get_text already reported the failure */
-    }
-    int maj, min, pat;
-    if (!parse_semver(text, &maj, &min, &pat)) {
-        cli_printf(c, "%-9s %s (unrecognized version.txt '%s')\r\n", "ota:",
-                   cfg->ota_repo, text);
+    char ver[32];
+    esp_err_t err = https_image_version(burl, ver, sizeof ver);
+    if (err != ESP_OK) {
+        cli_printf(c, "%-9s %s (%s)\r\n", "ota:", cfg->ota_repo, esp_err_to_name(err));
         return;
     }
-    cli_printf(c, "%-9s %s -> %d.%d.%d  %s\r\n", "ota:", cfg->ota_repo, maj, min, pat,
-               version_newer(maj, min, pat) ? "(update available)" : "(up to date)");
+    int maj, min, pat;
+    if (parse_semver(ver, &maj, &min, &pat)) {
+        cli_printf(c, "%-9s %s -> %s  (%s)\r\n", "ota:", cfg->ota_repo, ver,
+                   version_relation(maj, min, pat));
+    } else {
+        cli_printf(c, "%-9s %s -> %s\r\n", "ota:", cfg->ota_repo, ver);
+    }
 }
 
 /* Bare `update`: report versions from all three sources; install nothing. */

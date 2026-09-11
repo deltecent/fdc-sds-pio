@@ -793,6 +793,11 @@ repo is offering (§11.1). Installing is an explicit verb.
    targeting the inactive slot.
 3. On success, set boot partition, delete `/firmware.bin`, reboot.
 
+No version check: `update local` flashes whatever `/firmware.bin` holds — including an
+older or identical build — since that's a deliberate rollback or recovery. (Bare `update`
+still *reports* the image's embedded version so the operator sees what they're about to
+flash.)
+
 `update ota` is the network path (§11.1). Both require the dual-OTA partition table
 (`partitions.csv`). Offline workflow: FTP the new binary to SD as `firmware.bin`, then
 run `update local`.
@@ -800,35 +805,47 @@ run `update local`.
 ### 11.1 Network OTA **[RESOLVED: in scope for v1; a second source alongside SD]**
 
 `esp_https_ota` streams a firmware image straight into the inactive slot. The release
-binary and a version marker are **plain files committed to the `otaRepo` repository**
-(not GitHub *release assets* — this dodges the Releases-API rate limits and its
-asset-download CDN redirects). Two forms:
+binary is a **plain file committed to the `otaRepo` repository** (not a GitHub *release
+asset* — this dodges the Releases-API rate limits and its asset-download CDN redirects).
+Two forms:
 
-- **`update ota`** — pull from the configured repo. Fetch
-  `https://raw.githubusercontent.com/<otaRepo>/master/ota/version.txt`, parse the
-  `major.minor.patch` it holds, and compare to the running `version`. If it is newer,
-  stream `https://raw.githubusercontent.com/<otaRepo>/master/ota/firmware.bin` into
-  the inactive slot; if not, report "already up to date" and stop.
+- **`update ota`** — pull from the configured repo:
+  `https://raw.githubusercontent.com/<otaRepo>/master/ota/firmware.bin`. Begin the
+  `esp_https_ota` session, read the version from the incoming image's embedded
+  `esp_app_desc_t` (ESP-IDF stamps it into every app binary), and report it against the
+  running version — newer, older, or identical. **Then install it regardless.** The
+  operator asked to update, so an older or same-version image flashes too: rolling back a
+  bad release, or re-flashing the current version to recover a corrupt slot, are
+  deliberate uses. The version line is information, never a gate — there is no "already up
+  to date, stopping" refusal.
 - **`update <url>`** — flash an explicit image (undocumented; not shown in `help`). The
-  URL may be `https://` (any HTTPS binary, no version check) or `tnfs://` (served by the
-  M9 TNFS client — reported unavailable until that lands). No repo/version logic.
+  URL may be `https://` (any HTTPS binary) or `tnfs://` (served by the M9 TNFS client —
+  reported unavailable until that lands). Same unconditional install.
+
+Bare `update` (§11) only *reports* the repo's offered version: it runs the begin +
+read-descriptor step and then `esp_https_ota_abort()`s, transferring just the image header
+(a few hundred bytes), never the whole binary.
 
 Notes:
+- **No side version file.** The version is read from the binary's own `esp_app_desc_t`, so
+  there is nothing to keep in sync with the image. `include/version.h` feeds `PROJECT_VER`,
+  which ESP-IDF stamps into the descriptor at build time; that single number is what both
+  the build and the OTA version report use.
 - **TLS.** `raw.githubusercontent.com` serves repo files directly (HTTP 200, no redirect
   to a release-asset CDN), so certs validate against the ESP-IDF **`esp_crt_bundle`** CA
   roots with nothing host-pinned. Adds some TLS RAM pressure during the update.
 - **`otaRepo`** (§7) is `owner/repo`, defaulting to this project's own repo so
   `update ota` works out of the box; the locked CLI set (§8.1) has no command to change
   it, so a fork points elsewhere by rebuilding with a different default (or `wipe`+reflash).
-- **Release layout.** Cutting a release commits `ota/version.txt` (one `x.y.z` line, in
-  sync with `include/version.h`) and `ota/firmware.bin` to `master`.
+- **Release layout.** Cutting a release commits `ota/firmware.bin` to `master`, built from
+  the `include/version.h` bump. No separate version marker.
 - **Offline.** Network OTA **supplements**, does not replace, the SD `firmware.bin` path in
   §11, which stays the primary/offline mechanism; the whole feature is gated on WiFi up.
 
 **Build order:** SD-based OTA (§11) lands first since it's simplest; `update ota` /
 `update <url>` build on it once networking is up. All share one OTA writer + verify +
 set-boot-partition + reboot backend, so the network path is mostly the `esp_https_ota`
-front end plus the version-marker check.
+front end plus the descriptor read.
 
 ---
 

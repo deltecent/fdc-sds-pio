@@ -52,7 +52,7 @@ static void set_defaults(void)
     strcpy(s_cfg.ftp_pass, "fdc");
     /* Network OTA source repo (DESIGN.md §7/§11.1). The locked CLI set has no command
      * to set this, so it defaults to the project's own repo — `update ota` then works
-     * out of the box, pulling ota/version.txt + ota/firmware.bin from its master. */
+     * out of the box, pulling ota/firmware.bin from its master. */
     strcpy(s_cfg.ota_repo, "deltecent/fdc-sds-pio");
     /* drives empty */
 }

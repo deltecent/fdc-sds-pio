@@ -3,20 +3,20 @@
  *
  * Three sources, all sharing one esp_ota writer + set-boot + reboot backend:
  *   - SD    `/sd/firmware.bin`  (primary, offline)        -> ota_update_sd()
- *   - repo  version.txt check + release binary          -> ota_update_repo()  (`update ota`)
+ *   - repo  release binary `ota/firmware.bin`            -> ota_update_repo()  (`update ota`)
  *   - url   arbitrary https:// (tnfs:// once M9 lands)   -> ota_update_url()   (undocumented)
  *
- * The network paths pull raw files straight from the configured GitHub repo
+ * The network paths pull the raw binary straight from the configured GitHub repo
  * (`otaRepo`, §7) at branch `master`:
- *   https://raw.githubusercontent.com/<otaRepo>/master/ota/version.txt
  *   https://raw.githubusercontent.com/<otaRepo>/master/ota/firmware.bin
- * `update ota` fetches version.txt, compares it to the running version, and only
- * downloads the binary when it is newer.
+ * `update ota` reports the version embedded in that image (esp_app_desc_t) against the
+ * running one, then installs it regardless — newer, older, or the same. There is no
+ * side version marker; the binary is its own source of truth.
  *
  * Each update runs on its own core-0 task — TLS needs far more stack than the CLI
  * task carries — and streams progress to the invoking console. On success the device
- * reboots into the freshly written slot, so these calls return only on failure or when
- * there is nothing to do (repo already current). One update runs at a time.
+ * reboots into the freshly written slot, so an install call returns only on failure;
+ * bare `update` (status) returns normally. One update runs at a time.
  */
 #ifndef FDCSDS_OTA_H
 #define FDCSDS_OTA_H
@@ -38,8 +38,9 @@ esp_err_t ota_status(cli_console_t *c);
  * (DESIGN.md §11). */
 esp_err_t ota_update_sd(cli_console_t *c);
 
-/* Network OTA from the configured repo: compare version.txt to the running version
- * and, when newer, stream the release binary in (DESIGN.md §11.1, `update ota`). */
+/* Network OTA from the configured repo: stream `ota/firmware.bin` in and reboot. Reports
+ * the image's embedded version against the running one, then installs it regardless of the
+ * relation — no "newer only" gate (DESIGN.md §11.1, `update ota`). */
 esp_err_t ota_update_repo(cli_console_t *c);
 
 /* Network OTA from an explicit URL — https:// now, tnfs:// once the M9 client lands
