@@ -91,10 +91,12 @@ class Link:
         buf = bytearray()
         deadline = time.time() + timeout
         while len(buf) < need:
-            remaining = deadline - time.time()
-            if remaining <= 0:
+            if time.time() >= deadline:
                 break
-            self.ser.timeout = min(0.2, remaining)
+            # Keep the 0.2 s port timeout fixed (it may overrun the deadline by up to
+            # that). Assigning ser.timeout on an open port reconfigures it (tcsetattr),
+            # and on macOS that drops bytes in flight. A READ that hits the server's
+            # track cache lost ~40 bytes near the start of its payload this way.
             chunk = self.ser.read(need - len(buf))
             if chunk:
                 buf.extend(chunk)
