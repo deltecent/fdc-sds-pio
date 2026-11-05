@@ -32,6 +32,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "disk.h"
 #include "net.h"
 #include "sd.h"
 #include "tnfs_proto.h"
@@ -115,6 +116,7 @@ static uint8_t errno_to_tnfs(int e)
     case ENOTEMPTY:    return TNFS_ENOTEMPTY;
     case EBADF:        return TNFS_EBADF;
     case ENOMEM:       return TNFS_ENOMEM;
+    case EBUSY:        return TNFS_EBUSY;
     case EIO:          return TNFS_EIO;
     default:           return TNFS_EIO;
     }
@@ -369,9 +371,20 @@ static size_t h_open(session_t *s, const uint8_t *pl, size_t pn, uint8_t *body)
     if (tf & TNFS_O_TRUNC)  of |= O_TRUNC;
     if (tf & TNFS_O_EXCL)   of |= O_EXCL;
 
+    /* A mounted image may not be written, truncated or appended to (DESIGN.md §9.6/§10);
+     * a client then falls back to a read-only open. */
+    bool writes = (of & (O_WRONLY | O_RDWR | O_TRUNC | O_APPEND)) != 0;
+    if (writes && disk_change_begin(abs) >= 0) {
+        body[0] = TNFS_EBUSY;
+        return 1;
+    }
     int fd = open(abs, of, 0666);
+    int e = errno;
+    if (writes) {
+        disk_change_end();
+    }
     if (fd < 0) {
-        body[0] = errno_to_tnfs(errno);
+        body[0] = errno_to_tnfs(e);
         return 1;
     }
     s->files[slot] = fd;
@@ -532,6 +545,20 @@ static size_t h_pathop(session_t *s, const uint8_t *pl, size_t pn, uint8_t *body
 
 static int mkdir_op(const char *p) { return mkdir(p, 0777); }
 
+/* UNLINK, refused with EBUSY for a mounted image (DESIGN.md §9.6/§10). */
+static int unlink_op(const char *p)
+{
+    if (disk_change_begin(p) >= 0) {
+        errno = EBUSY;
+        return -1;
+    }
+    int r = unlink(p);
+    int e = errno;
+    disk_change_end();
+    errno = e;
+    return r;
+}
+
 static size_t h_rename(session_t *s, const uint8_t *pl, size_t pn, uint8_t *body)
 {
     if (pn < 2) {
@@ -562,7 +589,15 @@ static size_t h_rename(session_t *s, const uint8_t *pl, size_t pn, uint8_t *body
         body[0] = st;
         return 1;
     }
-    body[0] = (rename(oabs, nabs) == 0) ? TNFS_OK : errno_to_tnfs(errno);
+    /* Not a mounted image, nor a folder that holds one (DESIGN.md §9.6/§10). */
+    if (disk_change_begin(oabs) >= 0) {
+        body[0] = TNFS_EBUSY;
+        return 1;
+    }
+    int r = rename(oabs, nabs);
+    int e = errno;
+    disk_change_end();
+    body[0] = (r == 0) ? TNFS_OK : errno_to_tnfs(e);
     return 1;
 }
 
@@ -798,7 +833,7 @@ static void process(session_t *s, uint8_t seq, uint8_t cmd, const uint8_t *rx, s
     case TNFS_STAT:     blen = h_stat(s, pl, pn, body);     break;
     case TNFS_MKDIR:    blen = h_pathop(s, pl, pn, body, mkdir_op); break;
     case TNFS_RMDIR:    blen = h_pathop(s, pl, pn, body, rmdir);    break;
-    case TNFS_UNLINK:   blen = h_pathop(s, pl, pn, body, unlink);   break;
+    case TNFS_UNLINK:   blen = h_pathop(s, pl, pn, body, unlink_op);   break;
     case TNFS_RENAME:   blen = h_rename(s, pl, pn, body);   break;
     case TNFS_OPENDIR:  blen = h_opendir(s, pl, pn, body);  break;
     case TNFS_OPENDIRX: blen = h_opendirx(s, pl, pn, body); break;

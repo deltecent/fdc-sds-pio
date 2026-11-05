@@ -49,6 +49,23 @@ esp_err_t disk_unmount(int drive);
  * config is untouched, so the same images re-mount at boot. */
 void disk_unmount_all(void);
 
+/*
+ * Guard a change to an SD file or folder: a delete, a rename, or an open for write
+ * (truncate, append or overwrite). `path` is absolute ("/sd/..."). A mounted image must
+ * not change under its open handle: the SDS would keep writing to clusters the card
+ * has freed or given to another file (DESIGN.md §10).
+ *   - Returns -1 when `path` is no mounted image and holds none: the mount table is
+ *     held steady, so make the change and then call disk_change_end().
+ *   - Returns the drive number when `path` is a mounted image, or a folder that holds
+ *     one. Nothing is held; refuse the change.
+ * Names are compared as the card stores them (8.3 short names, sd_canonical), so
+ * neither case nor the long/short spelling hides a mounted image. A path that does not exist yet (a new name) is free.
+ */
+int disk_change_begin(const char *path);
+
+/* End a change that disk_change_begin() allowed. */
+void disk_change_end(void);
+
 /* True if `drive` currently has an image mounted and ready to serve tracks. A remote
  * (tnfs://) drive is "mounted" only while its session is live; it reads false while
  * configured-but-not-ready (WiFi down / mount pending). */

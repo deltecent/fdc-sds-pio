@@ -6,10 +6,14 @@
  * card the owner filled with images must never be silently wiped; a mount failure
  * is reported and the server continues (file commands then say "no SD card").
  */
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/spi_common.h"
 #include "esp_vfs_fat.h"
+#include "diskio_sdmmc.h" /* ff_diskio_get_pdrv_card */
+#include "ff.h"           /* f_stat: the stored name of a file (sd_canonical) */
 #include "sdmmc_cmd.h"
 #include "esp_log.h"
 
@@ -148,4 +152,89 @@ int sd_path(const char *name, char *buf, size_t len)
         return -1;
     }
     return n;
+}
+
+int sd_canonical(const char *abs, char *out, size_t cap)
+{
+    const size_t mlen = strlen(SD_MOUNT_POINT);
+    if (!s_mounted || !abs || !out || cap == 0 || strncmp(abs, SD_MOUNT_POINT, mlen) != 0 ||
+        (abs[mlen] != '\0' && abs[mlen] != '/')) {
+        return -1;
+    }
+    BYTE pdrv = ff_diskio_get_pdrv_card(s_card);
+    if (pdrv == 0xFF) {
+        return -1;
+    }
+
+    /* FILINFO holds a 256-byte long name: keep it and the FatFs path off the stack. */
+    struct {
+        FILINFO fi;
+        char    fpath[300]; /* "N:" + the canonical components so far */
+    } *w = malloc(sizeof *w);
+    if (!w) {
+        return -1;
+    }
+    size_t olen = 0;
+    out[0] = '\0';
+    int hlen = snprintf(w->fpath, sizeof w->fpath, "%u:", (unsigned)pdrv);
+    size_t flen = (size_t)hlen;
+    int ret = 0;
+
+    for (const char *p = abs + mlen; *p; ) {
+        while (*p == '/') {
+            ++p;
+        }
+        const char *seg = p;
+        while (*p && *p != '/') {
+            ++p;
+        }
+        size_t seglen = (size_t)(p - seg);
+        if (seglen == 0 || (seglen == 1 && seg[0] == '.')) {
+            continue;
+        }
+        if (seglen == 2 && seg[0] == '.' && seg[1] == '.') {
+            /* Up one level in both strings (stays at the root). */
+            char *o = strrchr(out, '/');
+            olen = o ? (size_t)(o - out) : 0;
+            out[olen] = '\0';
+            char *f = strrchr(w->fpath, '/');
+            flen = f ? (size_t)(f - w->fpath) : (size_t)hlen;
+            w->fpath[flen] = '\0';
+            continue;
+        }
+        if (flen + 1 + seglen >= sizeof w->fpath) {
+            ret = -1;
+            break;
+        }
+        w->fpath[flen] = '/';
+        memcpy(&w->fpath[flen + 1], seg, seglen);
+        w->fpath[flen + 1 + seglen] = '\0';
+        if (f_stat(w->fpath, &w->fi) != FR_OK) {
+            ret = -1; /* no such file or folder */
+            break;
+        }
+        /* Use the 8.3 short name from the directory entry. (FatFs fills fname from the
+         * name searched for, not the stored long name, so it is no identity.) The short
+         * name is unique in its folder and the same for any case or alias. exFAT has no
+         * short names; there the name compares without case. */
+        const char *nm = w->fi.altname[0] ? w->fi.altname : w->fi.fname;
+        size_t nlen = strlen(nm);
+        if (flen + 1 + nlen >= sizeof w->fpath || olen + (olen ? 1 : 0) + nlen >= cap) {
+            ret = -1;
+            break;
+        }
+        memcpy(&w->fpath[flen + 1], nm, nlen + 1);
+        flen += 1 + nlen;
+        if (olen) {
+            out[olen++] = '/';
+        }
+        memcpy(&out[olen], nm, nlen + 1);
+        olen += nlen;
+    }
+    free(w);
+    if (ret < 0) {
+        out[0] = '\0';
+        return -1;
+    }
+    return (int)olen;
 }

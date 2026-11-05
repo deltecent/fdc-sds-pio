@@ -35,6 +35,16 @@ bool sd_mounted(void);
  */
 int sd_path(const char *name, char *buf, size_t len);
 
+/*
+ * Canonical name of an absolute SD path ("/sd/a/b.dsk"), as the card stores it: each
+ * component becomes its 8.3 short name from its directory entry, joined by '/',
+ * relative to the root (no leading '/'). So any case, and the long or the short name,
+ * of one file give the same result. Empty and "." components are dropped and ".." goes up one level. Returns the
+ * length (0 for the root itself), or -1 if the path is not under the SD root, a
+ * component does not exist, or the result does not fit in `cap`.
+ */
+int sd_canonical(const char *abs, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
