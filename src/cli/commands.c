@@ -353,6 +353,7 @@ static int cmd_reboot(cli_console_t *c, int argc, char **argv)
     (void)argc;
     (void)argv;
     cli_write(c, "Rebooting...\r\n");
+    disk_unmount_all(); /* close the images so no written data is left in RAM (§10) */
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the message flush before reset */
     esp_restart();
     return 0; /* not reached */

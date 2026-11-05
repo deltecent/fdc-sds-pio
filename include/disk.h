@@ -44,6 +44,11 @@ esp_err_t disk_mount(int drive, const char *name);
 /* Unmount `drive` (closes its handle). No-op if the drive is not mounted. */
 esp_err_t disk_unmount(int drive);
 
+/* Unmount every drive, closing each image, before a planned restart (DESIGN.md §10).
+ * Waits for any track write in progress (it takes the disk lock). Persisted Drive<n>
+ * config is untouched, so the same images re-mount at boot. */
+void disk_unmount_all(void);
+
 /* True if `drive` currently has an image mounted and ready to serve tracks. A remote
  * (tnfs://) drive is "mounted" only while its session is live; it reads false while
  * configured-but-not-ready (WiFi down / mount pending). */

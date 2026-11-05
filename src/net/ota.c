@@ -49,6 +49,7 @@
 
 #include "cli.h"
 #include "config.h"
+#include "disk.h"
 #include "net.h"
 #include "ota.h"
 #include "sd.h"
@@ -486,6 +487,7 @@ static void ota_task(void *arg)
 
     if (j->result == ESP_OK && j->reboot) {
         cli_write(j->c, "rebooting into the new firmware...\r\n");
+        disk_unmount_all();             /* close the images before reset (§10) */
         vTaskDelay(pdMS_TO_TICKS(300)); /* let the console output flush first */
         esp_restart();                  /* does not return */
     }

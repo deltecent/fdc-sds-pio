@@ -781,6 +781,12 @@ board with `connect = "socket:<esp-ip>:<port>"`, in addition to the UART.
   leading `/` — Increase to 64 characters.
 - Image handle opened `r+` at mount, kept open for the mount lifetime; READ/WRIT seek
   and transfer on the open handle; unmount closes it.
+- **A WRIT is on the card before its `WSTA OK`.** Each track write is `fflush`ed and
+  `fsync`ed (FatFs `f_sync`) before the reply. A track is generally not a multiple of
+  the 512-byte card sector, so without the sync the end of a track can sit in the file's
+  own sector cache, and a reset or power loss tears the sector that crosses that
+  boundary. Every drive is also unmounted (images closed) before a planned restart
+  (`reboot`, OTA).
 - `firmware.bin` in root is the image `update local` flashes (§11).
 - `SDCARD/` in this repo mirrors intended card contents: CP/M 2.2 (8 MB + standard),
   CP/M 3, Disk/Timeshare BASIC, AltairDOS, Lifeboat, Games, Zork, a blank 8 MB image,

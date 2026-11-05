@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h> /* fsync */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -69,7 +70,13 @@ static esp_err_t local_write_at(disk_backing_t *b, uint32_t off, const void *buf
     if (fwrite(buf, 1, len, lb->fp) != len) {
         return ESP_FAIL;
     }
-    return fflush(lb->fp) == 0 ? ESP_OK : ESP_FAIL;
+    /* fflush only hands the bytes to FatFs, which keeps a partial last sector in the
+     * file's own sector cache; fsync (f_sync) puts it on the card before WSTA OK, so a
+     * reset can't tear the sector that crosses the track's end (DESIGN.md §10). */
+    if (fflush(lb->fp) != 0) {
+        return ESP_FAIL;
+    }
+    return fsync(fileno(lb->fp)) == 0 ? ESP_OK : ESP_FAIL;
 }
 
 static uint32_t local_size(disk_backing_t *b)
@@ -664,6 +671,16 @@ esp_err_t disk_unmount(int drive)
     unlock();
     backing_dispose(old, old_remote);
     return ESP_OK;
+}
+
+void disk_unmount_all(void)
+{
+    if (!s_lock) {
+        return; /* disk_init never ran: nothing is mounted */
+    }
+    for (int d = 0; d < DISK_MAX_DRIVE; ++d) {
+        disk_unmount(d);
+    }
 }
 
 bool disk_is_mounted(int drive)
