@@ -41,6 +41,7 @@ typedef struct {
     bool     telnet_enabled;                  /* Telnet console (:23) on/off (§9.2) */
     bool     ftp_enabled;                     /* FTP server (:21) on/off (§9.4) */
     bool     tnfsd_enabled;                   /* TNFS server (:16384) on/off (§9.6) */
+    uint16_t fdc_tcp_port;                    /* FDC+ protocol over TCP, 0 = off (§9.7) */
     char     wifi_ssid[CONFIG_SSID_CAP];      /* SSID */
     char     wifi_pass[CONFIG_PASS_CAP];      /* password */
     char     wifi_name[CONFIG_NAME_CAP];      /* hostname / device name / prompt */
@@ -87,6 +88,7 @@ void config_set_wifi_enabled(bool enabled);
 void config_set_telnet_enabled(bool enabled);
 void config_set_ftp_enabled(bool enabled);
 void config_set_tnfsd_enabled(bool enabled);
+void config_set_fdc_tcp_port(uint16_t port); /* 0 = off (§9.7) */
 void config_set_log_level(uint8_t level);  /* esp_log_level_t (§13) */
 void config_set_str(config_str_id_t id, const char *val);
 

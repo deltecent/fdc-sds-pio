@@ -15,10 +15,18 @@
  * All offset/length math is 32-bit and lives in protocol.h/disk.c (the old firmware's
  * signed-int track bug is called out in DESIGN.md §6.5). SD track I/O goes through the
  * `disk` module's mutex, so the CLI/FTP paths never collide with this task on the card.
+ *
+ * The same byte stream can instead arrive over TCP (DESIGN.md §9.7): the listener in
+ * net/fdc_tcp.c hands this task a connected socket, and while it is attached the
+ * protocol runs over the socket and UART input is discarded. One transport is served
+ * at a time, so the shared track buffer still has a single consumer.
  */
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "lwip/sockets.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -89,6 +97,16 @@ static SemaphoreHandle_t s_lb_lock;
 static SemaphoreHandle_t s_lb_done;
 static volatile bool     s_lb_req;
 static fdc_loopback_t    s_lb_result;
+
+/* FDC-over-TCP hand-off (§9.7). The listener stores a socket in s_tcp_pending; the
+ * task adopts it into s_tcp_fd (owned by the task alone) at its next idle poll. */
+static portMUX_TYPE  s_tcp_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int  s_tcp_pending = -1;
+static volatile bool s_tcp_active;   /* a client is attached (read by the listener) */
+static volatile bool s_tcp_kick;     /* listener asks the task to drop the client */
+static char          s_tcp_pending_peer[sizeof ((fdc_stats_t *)0)->tcp_peer];
+static int           s_tcp_fd = -1;
+static bool          s_tcp_dead;     /* I/O on s_tcp_fd failed; drop at next poll */
 
 /* Receive scratch: one command block + one full write track. */
 static uint8_t s_cmd[FDC_BLOCK_LEN];
@@ -170,7 +188,13 @@ void fdc_get_stats(fdc_stats_t *out)
 void fdc_clear_stats(void)
 {
     stat_lock();
+    fdc_stats_t live = s_stats;
     memset(&s_stats, 0, sizeof s_stats);
+    /* Keep the live link status; only the counters reset. */
+    s_stats.transport = live.transport;
+    s_stats.tcp_state = live.tcp_state;
+    s_stats.tcp_port = live.tcp_port;
+    memcpy(s_stats.tcp_peer, live.tcp_peer, sizeof s_stats.tcp_peer);
     stat_unlock();
 }
 
@@ -180,7 +204,7 @@ void fdc_clear_stats(void)
  * Read up to `need` bytes into `buf` within `timeout_ms`, returning how many arrived.
  * The caller checks the count against what it required (a short read is a timeout).
  */
-static size_t recv(uint8_t *buf, size_t need, uint32_t timeout_ms)
+static size_t uart_recv(uint8_t *buf, size_t need, uint32_t timeout_ms)
 {
     size_t got = 0;
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
@@ -199,9 +223,99 @@ static size_t recv(uint8_t *buf, size_t need, uint32_t timeout_ms)
     return got;
 }
 
-static void send(const uint8_t *buf, size_t len)
+static void uart_send(const uint8_t *buf, size_t len)
 {
     uart_write_bytes(s_port, (const char *)buf, len);
+}
+
+/* ---- TCP framing (§9.7) ---------------------------------------------------- */
+
+/* Same contract as uart_recv(). EOF or a socket error marks the client dead. */
+static size_t tcp_recv(uint8_t *buf, size_t need, uint32_t timeout_ms)
+{
+    size_t got = 0;
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    while (got < need && !s_tcp_dead) {
+        int64_t left_us = deadline - esp_timer_get_time();
+        if (left_us <= 0) {
+            break;
+        }
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(s_tcp_fd, &rfds);
+        struct timeval tv = { .tv_sec = left_us / 1000000, .tv_usec = left_us % 1000000 };
+        int n = select(s_tcp_fd + 1, &rfds, NULL, NULL, &tv);
+        if (n < 0) {
+            s_tcp_dead = true;
+            break;
+        }
+        if (n == 0) {
+            break; /* timeout */
+        }
+        int r = recv(s_tcp_fd, buf + got, need - got, 0);
+        if (r > 0) {
+            got += (size_t)r;
+        } else if (r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            s_tcp_dead = true; /* peer closed, or a real error */
+        }
+    }
+    return got;
+}
+
+static void tcp_send(const uint8_t *buf, size_t len)
+{
+    while (len > 0 && !s_tcp_dead) {
+        int r = send(s_tcp_fd, buf, len, 0);
+        if (r > 0) {
+            buf += r;
+            len -= (size_t)r;
+        } else {
+            s_tcp_dead = true; /* includes the SO_SNDTIMEO stall */
+        }
+    }
+}
+
+/* Discard whatever has already arrived on the socket (resync, §6.4). */
+static void tcp_flush_input(void)
+{
+    uint8_t junk[64];
+    while (!s_tcp_dead) {
+        int r = recv(s_tcp_fd, junk, sizeof junk, MSG_DONTWAIT);
+        if (r > 0) {
+            continue;
+        }
+        if (r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            s_tcp_dead = true;
+        }
+        break;
+    }
+}
+
+/* ---- active-transport dispatch --------------------------------------------- */
+
+static inline bool on_tcp(void) { return s_tcp_fd >= 0; }
+
+static size_t link_recv(uint8_t *buf, size_t need, uint32_t timeout_ms)
+{
+    return on_tcp() ? tcp_recv(buf, need, timeout_ms) : uart_recv(buf, need, timeout_ms);
+}
+
+static void link_send(const uint8_t *buf, size_t len)
+{
+    if (on_tcp()) {
+        tcp_send(buf, len);
+    } else {
+        uart_send(buf, len);
+    }
+}
+
+static void link_flush_input(void)
+{
+    if (on_tcp()) {
+        tcp_flush_input();
+    } else {
+        uart_flush_input(s_port);
+    }
 }
 
 /* Build a 10-byte response block (mnemonic + two words + checksum) into s_resp. */
@@ -232,7 +346,7 @@ static void handle_stat(void)
 
     uint16_t bitmap = disk_status_bitmap();
     build_resp("STAT", FDC_RESP_OK, bitmap);
-    send(s_resp, FDC_BLOCK_LEN);
+    link_send(s_resp, FDC_BLOCK_LEN);
 
     stat_lock();
     s_stats.stat++;
@@ -280,10 +394,10 @@ static void handle_read(void)
     const uint8_t *buf = disk_track_buffer(&d, &t, &l);
 
     /* Payload = <len> data bytes followed by their 16-bit LE checksum (§6.2). */
-    send(buf, len);
+    link_send(buf, len);
     uint8_t ck[FDC_CHECKSUM_LEN];
     fdc_write_le16(ck, fdc_checksum16(buf, len));
-    send(ck, sizeof ck);
+    link_send(ck, sizeof ck);
 
     stat_lock();
     s_stats.read++;
@@ -305,7 +419,7 @@ static void handle_writ(void)
     bool ready = (len > 0 && len <= DISK_TRACK_BUF_SIZE && disk_is_mounted(drive) &&
                   !disk_is_readonly(drive));
     build_resp("WRIT", ready ? FDC_RESP_OK : FDC_RESP_NOT_READY, 0);
-    send(s_resp, FDC_BLOCK_LEN);
+    link_send(s_resp, FDC_BLOCK_LEN);
 
     if (!ready) {
         stat_lock();
@@ -316,8 +430,8 @@ static void handle_writ(void)
     }
 
     /* Receive the track payload + its 16-bit checksum (§6.2, longer data window). */
-    if (recv(s_data, len, FDC_DATA_TIMEOUT_MS) != len) {
-        uart_flush_input(s_port);
+    if (link_recv(s_data, len, FDC_DATA_TIMEOUT_MS) != len) {
+        link_flush_input();
         stat_lock();
         s_stats.data_timeout++;
         stat_unlock();
@@ -325,8 +439,8 @@ static void handle_writ(void)
         return;
     }
     uint8_t ck[FDC_CHECKSUM_LEN];
-    if (recv(ck, sizeof ck, FDC_CMD_TIMEOUT_MS) != sizeof ck) {
-        uart_flush_input(s_port);
+    if (link_recv(ck, sizeof ck, FDC_CMD_TIMEOUT_MS) != sizeof ck) {
+        link_flush_input();
         stat_lock();
         s_stats.data_timeout++;
         stat_unlock();
@@ -356,7 +470,7 @@ static void handle_writ(void)
     }
 
     build_resp("WSTA", code, 0);
-    send(s_resp, FDC_BLOCK_LEN);
+    link_send(s_resp, FDC_BLOCK_LEN);
 }
 
 static void dispatch(void)
@@ -389,9 +503,9 @@ static void run_loopback(void)
     }
 
     uart_flush_input(s_port);
-    send(tx, sizeof tx);
+    uart_send(tx, sizeof tx);
     uart_wait_tx_done(s_port, pdMS_TO_TICKS(1000));
-    size_t got = recv(rx, sizeof rx, 1000);
+    size_t got = uart_recv(rx, sizeof rx, 1000);
 
     uint32_t mism = 0, first_bad = FDC_LOOPBACK_LEN;
     for (int i = 0; i < FDC_LOOPBACK_LEN; ++i) {
@@ -477,6 +591,90 @@ static void drain_uart_events(void)
     }
 }
 
+/* ---- FDC-over-TCP attach / detach (§9.7) ----------------------------------- */
+
+bool fdc_tcp_attach(int fd, const char *peer)
+{
+    bool ok = false;
+    portENTER_CRITICAL(&s_tcp_mux);
+    if (!s_tcp_active && s_tcp_pending < 0) {
+        strlcpy(s_tcp_pending_peer, peer ? peer : "", sizeof s_tcp_pending_peer);
+        s_tcp_pending = fd;
+        s_tcp_active = true;
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_tcp_mux);
+    if (!ok) {
+        stat_lock();
+        s_stats.tcp_refused++;
+        stat_unlock();
+    }
+    return ok;
+}
+
+bool fdc_tcp_busy(void)
+{
+    return s_tcp_active;
+}
+
+void fdc_tcp_detach(void)
+{
+    if (s_tcp_active) {
+        s_tcp_kick = true;
+    }
+}
+
+void fdc_tcp_set_state(fdc_tcp_state_t state, uint16_t port)
+{
+    stat_lock();
+    s_stats.tcp_state = state;
+    s_stats.tcp_port = port;
+    stat_unlock();
+}
+
+/* Close the attached client and fall back to the UART. */
+static void tcp_drop(const char *why)
+{
+    ESP_LOGI(TAG, "FDC+ TCP client %s %s; serving UART", s_stats.tcp_peer, why);
+    close(s_tcp_fd);
+    s_tcp_fd = -1;
+    s_tcp_dead = false;
+    s_tcp_kick = false;
+    stat_lock();
+    s_stats.tcp_disconnects++;
+    s_stats.transport = FDC_XPORT_UART;
+    s_stats.tcp_peer[0] = '\0';
+    if (s_stats.tcp_state == FDC_TCP_CONNECTED) {
+        s_stats.tcp_state = FDC_TCP_LISTENING;
+    }
+    stat_unlock();
+    led_drive_clear();
+    s_tcp_active = false; /* last: the listener may now accept the next client */
+}
+
+/* Called once per loop iteration: drop a dead/kicked client, adopt a pending one. */
+static void tcp_service(void)
+{
+    if (on_tcp() && (s_tcp_dead || s_tcp_kick)) {
+        tcp_drop(s_tcp_dead ? "disconnected" : "dropped (link down)");
+    }
+    if (!on_tcp() && s_tcp_pending >= 0) {
+        portENTER_CRITICAL(&s_tcp_mux);
+        s_tcp_fd = s_tcp_pending;
+        s_tcp_pending = -1;
+        portEXIT_CRITICAL(&s_tcp_mux);
+        s_tcp_dead = false;
+        s_tcp_kick = false;
+        stat_lock();
+        s_stats.tcp_connects++;
+        s_stats.transport = FDC_XPORT_TCP;
+        s_stats.tcp_state = FDC_TCP_CONNECTED;
+        memcpy(s_stats.tcp_peer, s_tcp_pending_peer, sizeof s_stats.tcp_peer);
+        stat_unlock();
+        ESP_LOGI(TAG, "FDC+ TCP client %s attached; UART input ignored", s_tcp_pending_peer);
+    }
+}
+
 /*
  * Install and configure UART2 for the FDC+ link. Called from the fdc task so the
  * driver's RX interrupt is allocated on core 1 (APP), off the WiFi/lwIP core where the
@@ -520,6 +718,7 @@ static void fdc_task(void *arg)
     for (;;) {
         apply_pending_baud();
         drain_uart_events();
+        tcp_service();
 
         if (s_lb_req) {
             run_loopback();
@@ -528,15 +727,19 @@ static void fdc_task(void *arg)
             continue;
         }
 
-        /* Idle-poll for the first byte so we stay responsive to baud/loopback. */
-        int r = uart_read_bytes(s_port, s_cmd, 1, pdMS_TO_TICKS(FDC_IDLE_POLL_MS));
-        if (r <= 0) {
+        /* While a TCP client holds the link, the UART is ignored (§9.7). */
+        if (on_tcp()) {
+            uart_flush_input(s_port);
+        }
+
+        /* Idle-poll for the first byte so we stay responsive to baud/loopback/TCP. */
+        if (link_recv(s_cmd, 1, FDC_IDLE_POLL_MS) != 1) {
             continue;
         }
 
         /* Complete the 10-byte command block within the command window. */
-        if (recv(&s_cmd[1], FDC_BLOCK_LEN - 1, FDC_CMD_TIMEOUT_MS) != FDC_BLOCK_LEN - 1) {
-            uart_flush_input(s_port);
+        if (link_recv(&s_cmd[1], FDC_BLOCK_LEN - 1, FDC_CMD_TIMEOUT_MS) != FDC_BLOCK_LEN - 1) {
+            link_flush_input();
             stat_lock();
             s_stats.cmd_timeout++;
             stat_unlock();

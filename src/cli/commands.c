@@ -77,6 +77,8 @@ static int cmd_ftppass(cli_console_t *c, int argc, char **argv);
 static int cmd_telnetd(cli_console_t *c, int argc, char **argv);
 static int cmd_ftpd(cli_console_t *c, int argc, char **argv);
 static int cmd_tnfsd(cli_console_t *c, int argc, char **argv);
+static int cmd_fdctcp(cli_console_t *c, int argc, char **argv);
+static void print_fdc_interface(cli_console_t *c, const fdc_stats_t *s, const char *indent);
 static int cmd_update(cli_console_t *c, int argc, char **argv);
 static int cmd_exec(cli_console_t *c, int argc, char **argv);
 
@@ -182,6 +184,14 @@ static const char D_tnfsd[] =
     "read/write to a TNFS client, with no password, so turn it off on an untrusted\r\n"
     "network. Save the change with 'save'; it takes effect after a reboot.\r\n"
     "usage: tnfsd [on | off]     (with no argument, shows whether it is enabled)\r\n";
+static const char D_fdctcp[] =
+    "Serves the FDC+ drive protocol on a TCP port, for a network FDC+ such as a\r\n"
+    "simulator (altairsim: connect = \"socket:<this-ip>:<port>\"). The socket carries\r\n"
+    "the same bytes as the serial port. While a client is connected it takes over\r\n"
+    "from the FDC+ serial port; when it disconnects, the serial port is served again.\r\n"
+    "One client at a time, no password. Save the change with 'save'; it takes\r\n"
+    "effect after a reboot.\r\n"
+    "usage: fdctcp [off | <port>]   (with no argument, shows the setting and state)\r\n";
 static const char D_update[] =
     "usage: update [local | ota]\r\n"
     "  update            show the running, SD-card, and available versions\r\n"
@@ -250,6 +260,7 @@ static const cli_command_t k_commands[] = {
     { "telnetd",  NULL,     "Enable or disable the Telnet console", cmd_telnetd, D_telnetd },
     { "ftpd",     NULL,     "Enable or disable the FTP server",    cmd_ftpd,   D_ftpd     },
     { "tnfsd",    NULL,     "Enable or disable the TNFS server",   cmd_tnfsd,  D_tnfsd    },
+    { "fdctcp",   NULL,     "Serve the FDC+ protocol on a TCP port", cmd_fdctcp, D_fdctcp },
     { "ftpuser",  NULL,     "Show or set the FTP username",        cmd_ftpuser, D_ftpuser },
     { "ftppass",  NULL,     "Set the FTP password",                cmd_ftppass, D_ftppass },
     { "update",   NULL,     "Show versions, or install an update", cmd_update, D_update   },
@@ -1201,6 +1212,7 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
     fdc_stats_t s;
     fdc_get_stats(&s);
     cli_printf(c, "FDC+ link: %lu baud\r\n", (unsigned long)fdc_baud());
+    print_fdc_interface(c, &s, "  ");
     cli_printf(c, "  %-10s%lu\r\n", "STAT",     (unsigned long)s.stat);
     cli_printf(c, "  %-10s%lu\r\n", "READ",     (unsigned long)s.read);
     cli_printf(c, "  %-10s%lu\r\n", "WRIT",     (unsigned long)s.writ);
@@ -1219,6 +1231,11 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "  %-10s%-6lu(RX framing: baud / electrical)\r\n",
                "frame-err", (unsigned long)s.frame_err);
     cli_printf(c, "  %-10s%lu\r\n", "unknown",  (unsigned long)s.unknown);
+    if (s.tcp_port) {
+        cli_printf(c, "  %-10s%lu connects, %lu disconnects, %lu refused\r\n", "tcp",
+                   (unsigned long)s.tcp_connects, (unsigned long)s.tcp_disconnects,
+                   (unsigned long)s.tcp_refused);
+    }
     cli_printf(c, "  %-10s%s\r\n",  "last",
                s.last_op[0] ? s.last_op : "(none)");
     return 0;
@@ -1497,6 +1514,65 @@ static int cmd_tnfsd(cli_console_t *c, int argc, char **argv)
     config_set_tnfsd_enabled(on);
     cli_printf(c, "TNFS server %s (save, then reboot to apply)\r\n",
                on ? "enabled" : "disabled");
+    return 0;
+}
+
+/* "UART" or "TCP (peer)" + the listener state, shared by `stats`, `fdctcp`, `diag`. */
+static const char *fdc_tcp_state_name(fdc_tcp_state_t st)
+{
+    switch (st) {
+    case FDC_TCP_LISTENING: return "listening";
+    case FDC_TCP_CONNECTED: return "connected";
+    default:                return "off";
+    }
+}
+
+static void print_fdc_interface(cli_console_t *c, const fdc_stats_t *s, const char *indent)
+{
+    if (s->transport == FDC_XPORT_TCP) {
+        cli_printf(c, "%sinterface: TCP (%s)\r\n", indent, s->tcp_peer);
+    } else {
+        cli_printf(c, "%sinterface: UART (%lu baud)\r\n", indent, (unsigned long)fdc_baud());
+    }
+    if (s->tcp_port) {
+        cli_printf(c, "%ssocket:    %s :%u\r\n", indent, fdc_tcp_state_name(s->tcp_state),
+                   s->tcp_port);
+    } else {
+        cli_printf(c, "%ssocket:    off\r\n", indent);
+    }
+}
+
+static int cmd_fdctcp(cli_console_t *c, int argc, char **argv)
+{
+    if (argc < 2) {
+        uint16_t port = config_get()->fdc_tcp_port;
+        if (port) {
+            cli_printf(c, "FDC+ TCP port is %u\r\n", port);
+        } else {
+            cli_write(c, "FDC+ TCP is off\r\n");
+        }
+        fdc_stats_t s;
+        fdc_get_stats(&s);
+        print_fdc_interface(c, &s, "");
+        return 0;
+    }
+    unsigned long port;
+    if (strcasecmp(argv[1], "off") == 0) {
+        port = 0;
+    } else {
+        char *end;
+        port = strtoul(argv[1], &end, 10);
+        if (*end || port < 1 || port > 65535) {
+            cli_write(c, "usage: fdctcp [off | <port 1-65535>]\r\n");
+            return 1;
+        }
+    }
+    config_set_fdc_tcp_port((uint16_t)port);
+    if (port) {
+        cli_printf(c, "FDC+ TCP set to port %lu (save, then reboot to apply)\r\n", port);
+    } else {
+        cli_write(c, "FDC+ TCP off (save, then reboot to apply)\r\n");
+    }
     return 0;
 }
 
@@ -1845,10 +1921,15 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "FTP user:  %s (password %s)\r\n",
                cfg->ftp_user[0] ? cfg->ftp_user : "(unset)",
                cfg->ftp_pass[0] ? "set" : "unset");
-    cli_printf(c, "Services:  telnetd %s, ftpd %s, tnfsd %s\r\n",
+    cli_printf(c, "Services:  telnetd %s, ftpd %s, tnfsd %s, fdctcp ",
                cfg->telnet_enabled ? "on" : "off",
                cfg->ftp_enabled ? "on" : "off",
                cfg->tnfsd_enabled ? "on" : "off");
+    if (cfg->fdc_tcp_port) {
+        cli_printf(c, "%u\r\n", cfg->fdc_tcp_port);
+    } else {
+        cli_write(c, "off\r\n");
+    }
     cli_printf(c, "OTA repo:  %s\r\n", cfg->ota_repo[0] ? cfg->ota_repo : "(unset)");
 
     /* -- WiFi -- */
@@ -1900,6 +1981,10 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
     fdc_stats_t s;
     fdc_get_stats(&s);
     cli_printf(c, "Link:      %lu baud\r\n", (unsigned long)fdc_baud());
+    print_fdc_interface(c, &s, "");
+    cli_printf(c, "TCP:       %lu connects, %lu disconnects, %lu refused\r\n",
+               (unsigned long)s.tcp_connects, (unsigned long)s.tcp_disconnects,
+               (unsigned long)s.tcp_refused);
     cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  rd-retry %lu  not-rdy %lu  unknown %lu\r\n",
                (unsigned long)s.stat, (unsigned long)s.read, (unsigned long)s.writ,
                (unsigned long)s.read_retry, (unsigned long)s.not_ready,

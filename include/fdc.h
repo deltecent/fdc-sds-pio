@@ -30,6 +30,19 @@ extern "C" {
  * side) produces no error packet here — the FDC silently re-reads — so `read_retry`
  * (a repeated READ of the same drive/track) is the only visibility into that case.
  */
+/* Which interface the fdc task is currently serving (DESIGN.md §9.7). */
+typedef enum {
+    FDC_XPORT_UART = 0,    /* the FDC+ serial port (default) */
+    FDC_XPORT_TCP,         /* a TCP client (e.g. a simulator) has preempted the UART */
+} fdc_transport_t;
+
+/* State of the FDC-over-TCP listener (DESIGN.md §9.7). */
+typedef enum {
+    FDC_TCP_OFF = 0,       /* disabled in config, or no WiFi link / socket failed */
+    FDC_TCP_LISTENING,     /* bound and waiting for a client */
+    FDC_TCP_CONNECTED,     /* a client is attached */
+} fdc_tcp_state_t;
+
 typedef struct {
     uint32_t stat;         /* STAT commands answered */
     uint32_t read;         /* READ commands that returned track data */
@@ -43,7 +56,15 @@ typedef struct {
     uint32_t fifo_ovf;     /* UART RX FIFO / ring overflow: bytes lost (ISR starved) */
     uint32_t frame_err;    /* UART framing error: bits mis-sampled (baud / electrical) */
     uint32_t unknown;      /* unrecognized 4-byte command mnemonics */
+    uint32_t tcp_connects;    /* TCP clients attached */
+    uint32_t tcp_disconnects; /* TCP clients dropped (closed, error, or link loss) */
+    uint32_t tcp_refused;     /* TCP connections turned away (a client was already on) */
     char     last_op[40];
+    /* Link state below is live status, not a counter: `clear` leaves it alone. */
+    fdc_transport_t transport; /* interface being served now */
+    fdc_tcp_state_t tcp_state; /* listener state */
+    uint16_t tcp_port;         /* configured port (0 = off) */
+    char     tcp_peer[24];     /* "a.b.c.d:port" of the attached client, else "" */
 } fdc_stats_t;
 
 /* Result of the loopback self-test (DESIGN.md §6.8). */
@@ -81,6 +102,21 @@ void fdc_clear_stats(void);
  * if the engine isn't running, ESP_ERR_TIMEOUT if the task didn't service the request.
  */
 esp_err_t fdc_loopback(fdc_loopback_t *out);
+
+/*
+ * FDC over TCP (DESIGN.md §9.7), called by the listener task (net/fdc_tcp.c).
+ *
+ * fdc_tcp_attach() hands a connected socket to the fdc task, which switches to it at
+ * its next idle poll and serves it until it closes, then falls back to the UART. It
+ * takes ownership of `fd` and returns false (without closing it) if a client is
+ * already attached or pending. fdc_tcp_busy() is true while one is.
+ * fdc_tcp_detach() asks the fdc task to drop the client (e.g. the WiFi link went down).
+ * fdc_tcp_set_state() records the listener state + port for `stats`.
+ */
+bool fdc_tcp_attach(int fd, const char *peer);
+bool fdc_tcp_busy(void);
+void fdc_tcp_detach(void);
+void fdc_tcp_set_state(fdc_tcp_state_t state, uint16_t port);
 
 #ifdef __cplusplus
 }

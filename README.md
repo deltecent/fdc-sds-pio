@@ -141,6 +141,7 @@ The prompt is the host name; a leading `* ` means the config has unsaved edits.
 | `hostname` `<name>` | Set the device/host name |
 | `ftpuser` / `ftppass` | Set FTP credentials |
 | `telnetd` / `ftpd` / `tnfsd` `[on\|off]` | Show / enable / disable each network service (applies after `save` + `reboot`) |
+| `fdctcp [off\|<port>]` | Serve the FDC+ drive protocol on a TCP port, or turn it off (applies after `save` + `reboot`) |
 | `time` / `date`, `tz` | Show the clock; set the timezone (`tz ?` lists US zones) |
 | `update` `[local\|ota]` | Firmware update (§ below) |
 | `save` / `write`, `wipe` | Persist config to NVS / erase it and reload defaults |
@@ -212,6 +213,24 @@ A `tnfs://` endpoint works as either the source or the destination; an `http(s):
 is a source only (HTTP has no upload path), and `https://` is verified against the
 bundled CA roots. Need a TNFS server to `copy` to or from? [de-tnfsd](https://github.com/deltecent/de-tnfsd)
 is a small Python one.
+
+### FDC+ over TCP
+
+The drive protocol can also be served over a TCP socket, to a network FDC+ such as the
+[altairsim](https://github.com/deltecent/altairsim) `fdcplus` board. It's off by default;
+pick a port, then `save` and `reboot`:
+
+```
+fdctcp 8800
+save
+reboot
+```
+
+Then point the simulator at the device: `connect = "socket:<device-ip>:8800"`. The socket
+carries the same bytes as the serial port. While a client is connected it takes over
+from the FDC+ serial port, and when it disconnects the serial port is served again. One
+client is served at a time, with no password. `stats` shows which interface is being
+served and whether the socket is off, listening or connected.
 
 ## Firmware update (OTA)
 

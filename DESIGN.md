@@ -167,7 +167,7 @@ command timeout) from networking and CLI work. `app_main` initializes subsystems
 
 | Task | Priority | Core | Responsibility |
 |---|---|---|---|
-| `fdc` | **High** | **1 (APP)** | The only task on the FDC UART. Blocks on UART RX; parses STAT/READ/WRIT/WSTA; does the SD track read/write inline; drives LEDs + stats. Never blocked by net/CLI. |
+| `fdc` | **High** | **1 (APP)** | The only task on the FDC UART, and on the FDC-over-TCP client socket when one is attached (§9.7). Blocks on RX; parses STAT/READ/WRIT/WSTA; does the SD track read/write inline; drives LEDs + stats. Never blocked by net/CLI. |
 | `cli` | Low | 0 | Serial (UART0) + Telnet line editors and command dispatch. |
 | `net` | Low | 0 | WiFi/`esp_netif` event handling, Telnet accept, NTP; owns the FTP server (its own task/threads from the component). |
 
@@ -345,6 +345,7 @@ v1 schema (namespace `fdcsds`):
 | `telnetEnabled` | bool | Telnet console (:23) on/off *(see §9.2)* | `true` |
 | `ftpEnabled` | bool | FTP server (:21) on/off *(see §9.4)* | `true` |
 | `tnfsdEnabled` | bool | TNFS server (:16384) on/off *(see §9.6)* | `true` |
+| `fdcTcpPort` | u16 | FDC+ protocol over TCP: listen port, `0` = off *(see §9.7)* | `0` (off) |
 | `wifiSSID` | string(≤80) | SSID | empty |
 | `wifiPass` | string(≤80) | password | empty |
 | `wifiName` | string(≤40) | hostname / device name / prompt | `FDC-SDS-ESP32` |
@@ -582,8 +583,8 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
 - `nc host 23` still works: it sends no `IAC`, so it never replies `DO ECHO` and server
   echo stays **off** — its own cooked-mode local echo shows typing (no double echo). It
   just lacks the server-driven line editing a `telnet` client gets.
-- The console carries text only; the binary FDC path is a separate UART, so a genuine
-  0xFF data byte is never meaningful here.
+- The console carries text only; the binary FDC path is the UART or its own TCP port
+  (§9.7), never this socket, so a genuine 0xFF data byte is never meaningful here.
 
 ### 9.3 ssh console
 - SSH :22. On connect, print banner + prompt and route the CLI to the Ssh stream.
@@ -740,6 +741,38 @@ A Python client to test this server with is `deltecent/de-tnfs`
   connected bit and drops its sessions on a WiFi drop.
 
 ---
+### 9.7 FDC+ protocol over TCP **[RESOLVED: in scope]**
+
+Serves the §6 drive protocol to a **network FDC+**, such as the altairsim `fdcplus`
+board with `connect = "socket:<esp-ip>:<port>"`, in addition to the UART.
+
+- **Raw byte stream.** The socket carries exactly the §6 bytes: no header, handshake,
+  Telnet layer or keepalive message. Framing, checksums and timeouts (§6.4) are
+  unchanged. The client never redials, so it must reconnect on its own.
+- **One setting (`fdcTcpPort`, §7).** Either `off` (0, the default) or a port number.
+  There is no default port; docs use `8800` in examples. The `fdctcp off | <port>` command
+  sets it. Like the other services, it is read once at boot, so a change is saved with
+  `save` and takes effect on the next **reboot**. When on, the listener advertises
+  `_fdcplus._tcp` over mDNS.
+- **One client, TCP preempts the UART.** A listener task (core 0, low priority)
+  accepts and hands the socket to the `fdc` task. At its next idle poll the `fdc` task
+  switches to the socket and discards UART input. When the client closes or errors,
+  or the WiFi link drops, the `fdc` task closes the socket and serves the UART again.
+  A second connection while one is attached is accepted and closed at once. Only one
+  transport is ever served, so the track buffer keeps a single consumer and no disk
+  locking changes. `loopback` and `baud` always act on the UART.
+- **Socket options.** TCP_NODELAY (small command/response blocks), TCP keepalive
+  (10 s idle, 5 s × 3) to notice a vanished peer, and a 7 s send timeout (the §6.4
+  data window).
+- **Status.** `stats`, `fdctcp` and `diag` show the interface being served (UART at
+  its baud, or TCP with the peer `ip:port`) and the socket state (`off`, `listening
+  :<port>`, `connected :<port>`), plus connect, disconnect and refused counts. `clear`
+  resets the counts but not the live state.
+- **Latency note.** The `fdc` task blocks on lwIP socket calls only while a TCP client
+  is attached. The "never block on a network resource" rule (§5.2) still holds for the
+  UART path.
+- **No authentication.** Anyone who reaches the port can read and write the mounted
+  images. It is off by default; enable it only on a trusted LAN.
 
 ## 10. Storage (SD Card)
 

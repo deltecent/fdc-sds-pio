@@ -26,6 +26,7 @@
 #include "net.h"
 #include "config.h"
 #include "disk.h"
+#include "fdc_tcp.h"
 #include "ftp.h"
 #include "tnfs_proto.h" /* TNFS_DEFAULT_PORT for the mDNS advert (§9.6) */
 #include "tnfs_server.h"
@@ -254,6 +255,9 @@ esp_err_t net_init(void)
         if (cfg->tnfsd_enabled) {
             mdns_service_add(NULL, "_tnfs", "_udp", TNFS_DEFAULT_PORT, NULL, 0); /* §9.6 */
         }
+        if (cfg->fdc_tcp_port) {
+            mdns_service_add(NULL, "_fdcplus", "_tcp", cfg->fdc_tcp_port, NULL, 0); /* §9.7 */
+        }
     } else {
         ESP_LOGW(TAG, "mDNS init failed (name discovery unavailable)");
     }
@@ -280,6 +284,13 @@ esp_err_t net_init(void)
         }
     } else {
         ESP_LOGI(TAG, "TNFS server disabled in config");
+    }
+    if (cfg->fdc_tcp_port) {
+        if (net_fdc_tcp_start(cfg->fdc_tcp_port) != ESP_OK) {
+            ESP_LOGW(TAG, "FDC+ TCP task not started (out of memory)");
+        }
+    } else {
+        ESP_LOGI(TAG, "FDC+ TCP disabled in config");
     }
 
     /* Start connecting now if enabled and configured (DESIGN.md §12 step 9). */

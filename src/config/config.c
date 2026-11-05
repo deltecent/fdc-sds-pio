@@ -26,6 +26,7 @@ static const char *TAG = "config";
 #define KEY_TELNETEN "telnetEnabled"
 #define KEY_FTP_EN  "ftpEnabled"
 #define KEY_TNFSD_EN "tnfsdEnabled"
+#define KEY_FDCTCP  "fdcTcpPort"
 #define KEY_SSID    "wifiSSID"
 #define KEY_PASS    "wifiPass"
 #define KEY_NAME    "wifiName"
@@ -53,6 +54,7 @@ static void set_defaults(void)
     s_cfg.telnet_enabled = true;
     s_cfg.ftp_enabled = true;
     s_cfg.tnfsd_enabled = true;
+    /* fdc_tcp_port 0: FDC-over-TCP off until a port is set (§9.7) */
     /* ssid/pass empty */
     strcpy(s_cfg.wifi_name, "FDC-SDS-ESP32");
     strcpy(s_cfg.time_zone, "UTC0");
@@ -97,6 +99,10 @@ static void load_from_nvs(nvs_handle_t h)
     }
     if (nvs_get_u8(h, KEY_TNFSD_EN, &u8) == ESP_OK) {
         s_cfg.tnfsd_enabled = (u8 != 0);
+    }
+    uint16_t u16;
+    if (nvs_get_u16(h, KEY_FDCTCP, &u16) == ESP_OK) {
+        s_cfg.fdc_tcp_port = u16;
     }
     load_str(h, KEY_SSID, s_cfg.wifi_ssid, sizeof s_cfg.wifi_ssid);
     load_str(h, KEY_PASS, s_cfg.wifi_pass, sizeof s_cfg.wifi_pass);
@@ -174,6 +180,7 @@ esp_err_t config_save(void)
     if (err == ESP_OK) err = nvs_set_u8(h, KEY_TELNETEN, s_cfg.telnet_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, KEY_FTP_EN, s_cfg.ftp_enabled ? 1 : 0);
     if (err == ESP_OK) err = nvs_set_u8(h, KEY_TNFSD_EN, s_cfg.tnfsd_enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_set_u16(h, KEY_FDCTCP, s_cfg.fdc_tcp_port);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_SSID, s_cfg.wifi_ssid);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_PASS, s_cfg.wifi_pass);
     if (err == ESP_OK) err = nvs_set_str(h, KEY_NAME, s_cfg.wifi_name);
@@ -258,6 +265,14 @@ void config_set_tnfsd_enabled(bool enabled)
 {
     if (s_cfg.tnfsd_enabled != enabled) {
         s_cfg.tnfsd_enabled = enabled;
+        s_dirty = true;
+    }
+}
+
+void config_set_fdc_tcp_port(uint16_t port)
+{
+    if (s_cfg.fdc_tcp_port != port) {
+        s_cfg.fdc_tcp_port = port;
         s_dirty = true;
     }
 }
