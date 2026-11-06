@@ -65,9 +65,12 @@ Add `-v` to any command to dump the TX/RX bytes.
 ## Track length
 
 The server is geometry-agnostic — it uses whatever transfer length the FDC sends. The
-8 MB CP/M images (`CPM22-8MB-56K.DSK`, blank/Games/Zork) are **1096 tracks × 8192
-bytes**, so `--len 8192` / `--track-len 8192` (the defaults). Standard 8" floppy images
-(337,664 bytes) use a different track length — pass the right `--track-len` for those.
+8 MB CP/M images (`CPM22-8MB-56K.DSK`, blank/Games/Zork) are **2048 tracks × 4384
+bytes** (32 sectors × 137 bytes), and 4384 is what the real FDC+ sends; pass `--len 4384`
+/ `--track-len 4384` to match it. The defaults (`8192`) are the server's track-buffer
+size, which stresses the largest transfer it accepts. Because the offset is
+`track * len`, a given track number lands at a different place in the image for each
+length.
 
 ## Host adapter baud ceiling (test-rig limit, not the firmware)
 

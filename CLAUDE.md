@@ -25,8 +25,9 @@ images (files on a microSD card) to the FDC+ controller over a high-speed serial
   (FDC+ Manual, `FDC Serial Server Protocol.txt`, schematics, Windows server, firmware
   source). The protocol and pin map are **wire contracts** — see DESIGN.md §2.1, §6.
 - `SDCARD/` — reference disk images + `.bat` mount scripts (intended card contents).
-  Standard Altair images are 337,664 B; 8 MB CP/M disks are 8,978,432 B = 1096 × 8192,
-  which is why the track buffer must be ≥ 8192 B.
+  Standard Altair images are 337,664 B; 8 MB CP/M disks are 8,978,432 B = 2048 tracks × 4384 B
+  (32 sectors × 137 B). The FDC+ never sends more than 4384 B; the ≥ 8192 B track
+  buffer is headroom.
 
 ## Toolchain (macOS Apple Silicon)
 

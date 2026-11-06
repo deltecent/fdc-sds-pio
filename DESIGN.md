@@ -293,9 +293,12 @@ of fixed-length tracks. Observed from the reference SD images:
 | Image class | File size | Implied geometry |
 |---|---|---|
 | Standard Altair floppy (`.dsk`) | 337,664 bytes | ~77-track 8" CP/M/BASIC images |
-| 8 MB CP/M disk (`8MB`, blank, Games, Zork) | 8,978,432 bytes | **1096 tracks × 8192 bytes** |
+| 8 MB CP/M disk (`8MB`, blank, Games, Zork) | 8,978,432 bytes | **2048 tracks × 4384 bytes** (32 sectors × 137 bytes) |
 
-The **8192-byte** track of the 8 MB format sets the **minimum track-buffer size**.
+The 8 MB format's track is the same 4384 bytes as an 8" floppy track; the FDC and the
+BIOS address it as 2048 tracks, which fits the 12-bit track field (§6.2). 4384 is not a
+multiple of 512, so a track write ends part-way through an SD sector (§10). The track
+buffer is sized with headroom above this (§6.6).
 
 > **[RESOLVED]** Track-offset arithmetic: the 8 MB image (8,978,432 B) exceeds a signed
 > 16-bit range and `track * len` can approach 2^23. Use `uint32_t`/`size_t`/`off_t`
@@ -308,8 +311,8 @@ The **8192-byte** track of the 8 MB format sets the **minimum track-buffer size*
 - A 1-entry "last (drive,track,len)" cache may skip redundant SD reads (optional).
 - **[CLAUDE — resolved during M9b: real max transfer.]** The largest `len` the FDC+
   ever requests is **137 × 32 = 4384 bytes** (32 sectors × 137-byte 8" sector). The
-  FDC+ never asks for an 8192-byte transfer — the 8 MB image's 8192-byte on-disk track
-  (§6.5) is a byte-offset unit (`track * len`), not a per-command transfer length. So
+  FDC+ never asks for an 8192-byte transfer — the 8 MB image is 2048 tracks of 4384
+  bytes (§6.5), and its byte offset is `track * len` with a `len` of 4384. So
   the **≥ 8192-byte buffer is deliberate headroom**, and a worst-case remote READ is
   ~4384 B ≈ 5 TNFS datagrams + a seek (~6 round trips, ~0.3 s over WAN) — comfortably
   inside the 7 s data timeout (§10.1).
@@ -851,7 +854,7 @@ only the *backing* differs.
   `disk_read_track`/`disk_write_track` and the FDC engine call the backing and don't know
   which it is. Design the M3 disk API this way from the start so TNFS is additive (same
   spirit as the "don't hardcode root" rule above).
-- **Latency vs the ~1 s FDC timeout — the key risk [DECIDE].** An 8192-byte track is many
+- **Latency vs the ~1 s FDC timeout — the key risk [DECIDE].** A 4384-byte track is several
   TNFS datagrams (per-read payload is capped), each a WiFi round trip; a blocking remote
   read can approach or exceed the FDC command timeout, and it must **not** run on the
   core-1 `fdc` task (§9.5 / §5.2). Mitigations to build and measure: keep the 1-entry

@@ -31,7 +31,8 @@ import serial
 # Supported FDC+ bauds (DESIGN.md §6.1). 403200 is the default/target.
 DEFAULT_BAUDS = [9600, 19200, 38400, 57600, 76800, 115200, 230400, 403200, 460800]
 DEFAULT_PORT = "/dev/cu.usbserial-AB0NW409"
-# A real 8 MB-image track is 8192 data bytes + a 2-byte checksum on the wire.
+# The largest transfer the server accepts: an 8192-byte track buffer + a 2-byte
+# checksum on the wire. (The real FDC+ sends at most 4384 + 2.)
 DEFAULT_LEN = 8194
 
 

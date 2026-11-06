@@ -35,9 +35,9 @@
 #define FDC_RESP_WRITE_ERR   3
 
 /*
- * Track-buffer size = the largest supported track (DESIGN.md §6.5/§6.6): the 8 MB
- * CP/M image is 1096 tracks × 8192 bytes, so a track is at most 8192 bytes. READ/WRIT
- * must reject a transfer length larger than this.
+ * Track-buffer size (DESIGN.md §6.5/§6.6). The largest track the FDC+ sends is 4384
+ * bytes (32 sectors × 137 bytes); the 8 MB CP/M image is 2048 such tracks. 8192 is
+ * headroom. READ/WRIT must reject a transfer length larger than this.
  */
 #define DISK_TRACK_BUF_SIZE 8192
 

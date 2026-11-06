@@ -84,28 +84,28 @@ static void test_word1_decode(void)
 
 static void test_track_offset_32bit(void)
 {
-    /* 8 MB image: track 1095 * 8192 = 8,970,240 — well past a signed 16-bit range. */
-    TEST_ASSERT_EQUAL_UINT32(8970240u, disk_track_offset(1095, 8192));
-    TEST_ASSERT_EQUAL_UINT32(0u, disk_track_offset(0, 8192));
+    /* 8 MB image: track 2047 * 4384 = 8,974,048 — well past a signed 16-bit range. */
+    TEST_ASSERT_EQUAL_UINT32(8974048u, disk_track_offset(2047, 4384));
+    TEST_ASSERT_EQUAL_UINT32(0u, disk_track_offset(0, 4384));
 }
 
 static void test_track_count(void)
 {
-    /* The 8 MB CP/M image is exactly 1096 tracks of 8192 bytes (DESIGN.md §6.5). */
-    TEST_ASSERT_EQUAL_UINT32(1096u, disk_track_count(8978432u, 8192));
+    /* The 8 MB CP/M image is exactly 2048 tracks of 4384 bytes (DESIGN.md §6.5). */
+    TEST_ASSERT_EQUAL_UINT32(2048u, disk_track_count(8978432u, 4384));
     TEST_ASSERT_EQUAL_UINT32(0u, disk_track_count(8978432u, 0));
 }
 
 static void test_track_in_bounds(void)
 {
-    const uint32_t size = 8978432u; /* 1096 * 8192 */
+    const uint32_t size = 8978432u; /* 2048 * 4384 */
 
-    TEST_ASSERT_TRUE(disk_track_in_bounds(0, 8192, size));
-    TEST_ASSERT_TRUE(disk_track_in_bounds(1095, 8192, size)); /* last full track */
-    TEST_ASSERT_FALSE(disk_track_in_bounds(1096, 8192, size)); /* one past the end */
+    TEST_ASSERT_TRUE(disk_track_in_bounds(0, 4384, size));
+    TEST_ASSERT_TRUE(disk_track_in_bounds(2047, 4384, size)); /* last full track */
+    TEST_ASSERT_FALSE(disk_track_in_bounds(2048, 4384, size)); /* one past the end */
 
     /* A partial track at the tail must be rejected. */
-    TEST_ASSERT_FALSE(disk_track_in_bounds(1095, 8192, size - 1));
+    TEST_ASSERT_FALSE(disk_track_in_bounds(2047, 4384, size - 1));
 
     /* Degenerate + overflow guards. */
     TEST_ASSERT_FALSE(disk_track_in_bounds(0, 0, size));
