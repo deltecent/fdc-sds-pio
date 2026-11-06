@@ -7,6 +7,41 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versioning starts fresh at 1.0.0 for this from-scratch ESP-IDF rewrite; the old Arduino
 firmware ended at 0.25.
 
+## [1.0.7] - 2026-11-06
+
+### Added
+
+- **FDC+ drive protocol over TCP (`fdctcp`).** The §6 drive protocol can now be served
+  on a TCP port for a network FDC+, such as the altairsim `fdcplus` board
+  (`connect = "socket:<ip>:<port>"`). Off by default; `fdctcp <port>`, then `save` and
+  `reboot`, turns it on (`fdctcp off` turns it off). One client at a time; while it is
+  connected the UART is ignored, and the server goes back to the UART when the client
+  disconnects or WiFi drops. Advertised over mDNS as `_fdcplus._tcp`. `stats`, `fdctcp`
+  and `diag` show which interface is being served and the connection counts.
+
+### Fixed
+
+- **Track writes survive a reset or power loss.** A WRIT could be acknowledged while the
+  last partial sector of the track was still in the FAT file cache, so a reset before the
+  next access tore that sector and CP/M reported "Bad Sector". Each track write is now
+  synced to the card before WSTA, and `reboot` and OTA close every mounted image before
+  restarting. (#1)
+- **A mounted image can no longer be deleted, renamed or overwritten.** The CLI
+  (`delete`, `rename`, `copy`), FTP (`DELE`, `RNTO`, `STOR`, `APPE`) and TNFS (unlink,
+  rename, open for write) now refuse to change a mounted image or a folder that holds
+  one, instead of letting the server keep writing to freed clusters. Reading a mounted
+  image still works. (#2)
+- **A READ can no longer return another track's data.** The track was sent from the
+  shared buffer after the disk lock was released, so a concurrent console `dump` or a
+  late remote job could replace it with a different track under a valid checksum, which
+  the FDC+ would then write back to the wrong track. Each READ now copies its track out
+  under the lock. (#5)
+
+### Removed
+
+- The `rd-retry` counter in `stats`. The server cannot tell a retried READ from a normal
+  re-read of the same track, so the count was misleading. (#4)
+
 ## [1.0.6] - 2026-09-11
 
 ### Fixed
