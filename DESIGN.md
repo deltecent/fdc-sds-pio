@@ -1028,11 +1028,13 @@ front end plus the descriptor read.
 
 In-RAM counters, split by the point in the transaction where a fault is observed (the
 server is a passive responder, so it only sees corruption in bytes the FDC sends *to*
-it): `stat`, `read`, `writ`, `read_retry` (FDC re-read the same drive/track — the only
-signal of a READ the FDC rejected, since it sends no error packet), `not_ready`,
-`cmd_csum` (bad command-header checksum), `data_csum` (bad WRIT track-data checksum →
-`WSTA 2`), `cmd_timeout` (command header truncated), `data_timeout` (WRIT track data /
-its checksum incomplete), `unknown`; plus a formatted "last op" string. Two counters
+it): `stat`, `read`, `writ`, `not_ready`, `cmd_csum` (bad command-header checksum),
+`data_csum` (bad WRIT track-data checksum → `WSTA 2`), `cmd_timeout` (command header
+truncated), `data_timeout` (WRIT track data / its checksum incomplete), `unknown`; plus
+a formatted "last op" string. A READ response the FDC rejects is **not** counted: the
+FDC sends no error packet, only the same READ again, and the server cannot tell that
+from a normal re-read of the same track (for example, the next CP/M command reading
+the directory track again). Two counters
 come straight from the UART driver's event queue and name the *hardware* mechanism
 behind a checksum/timeout: `fifo_ovf` (RX FIFO/ring overflow — bytes lost because the
 RX ISR was starved) and `frame_err` (a framing error — bits mis-sampled, i.e. a baud

@@ -27,8 +27,8 @@ extern "C" {
  * The server is a passive responder: it can only observe corruption in bytes the FDC
  * sends *to* it, so the checksum/timeout counters name where in the transaction the
  * fault occurred (DESIGN.md §6.4). A READ whose data the FDC rejects (bad CRC on its
- * side) produces no error packet here — the FDC silently re-reads — so `read_retry`
- * (a repeated READ of the same drive/track) is the only visibility into that case.
+ * side) produces no error packet here: the FDC silently sends the READ again, and that
+ * cannot be told apart from a normal re-read of the same track, so it is not counted.
  */
 /* Which interface the fdc task is currently serving (DESIGN.md §9.7). */
 typedef enum {
@@ -52,7 +52,6 @@ typedef struct {
     uint32_t data_csum;    /* bad checksum on WRIT track data (payload from FDC) -> WSTA 2 */
     uint32_t cmd_timeout;  /* command block truncated before the 10 bytes arrived */
     uint32_t data_timeout; /* WRIT track data / its checksum did not fully arrive */
-    uint32_t read_retry;   /* READ repeating the previous drive/track (FDC re-reading) */
     uint32_t fifo_ovf;     /* UART RX FIFO / ring overflow: bytes lost (ISR starved) */
     uint32_t frame_err;    /* UART framing error: bits mis-sampled (baud / electrical) */
     uint32_t unknown;      /* unrecognized 4-byte command mnemonics */

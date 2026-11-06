@@ -1250,7 +1250,6 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "  %-10s%lu\r\n", "STAT",     (unsigned long)s.stat);
     cli_printf(c, "  %-10s%lu\r\n", "READ",     (unsigned long)s.read);
     cli_printf(c, "  %-10s%lu\r\n", "WRIT",     (unsigned long)s.writ);
-    cli_printf(c, "  %-10s%lu\r\n", "rd-retry", (unsigned long)s.read_retry);
     cli_printf(c, "  %-10s%lu\r\n", "not-rdy",  (unsigned long)s.not_ready);
     cli_printf(c, "  %-10s%-6lu(bad command header from FDC)\r\n",
                "cmd-csum", (unsigned long)s.cmd_csum);
@@ -2019,10 +2018,9 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "TCP:       %lu connects, %lu disconnects, %lu refused\r\n",
                (unsigned long)s.tcp_connects, (unsigned long)s.tcp_disconnects,
                (unsigned long)s.tcp_refused);
-    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  rd-retry %lu  not-rdy %lu  unknown %lu\r\n",
+    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  not-rdy %lu  unknown %lu\r\n",
                (unsigned long)s.stat, (unsigned long)s.read, (unsigned long)s.writ,
-               (unsigned long)s.read_retry, (unsigned long)s.not_ready,
-               (unsigned long)s.unknown);
+               (unsigned long)s.not_ready, (unsigned long)s.unknown);
     cli_printf(c, "cmd-csum %lu  data-csum %lu  cmd-tmo %lu  data-tmo %lu  "
                   "fifo-ovf %lu  frame-err %lu\r\n",
                (unsigned long)s.cmd_csum, (unsigned long)s.data_csum,

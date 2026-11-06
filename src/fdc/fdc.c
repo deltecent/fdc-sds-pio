@@ -354,10 +354,6 @@ static void handle_stat(void)
     set_last_op("STAT sel=%u map=0x%04x", sel, bitmap);
 }
 
-/* Last drive/track a READ served, to flag the FDC re-reading the same track (§6.4). */
-static int      s_last_read_drive = -1;
-static uint16_t s_last_read_track;
-
 static void handle_read(void)
 {
     uint16_t word1 = fdc_read_le16(&s_cmd[FDC_OFF_WORD1]);
@@ -366,17 +362,6 @@ static void handle_read(void)
     uint16_t track = fdc_word1_track(word1);
 
     led_drive_select(drive);
-
-    /* A READ repeating the previous one means the FDC rejected our last response
-     * (bad CRC on its side, or a timeout) and is re-reading — the only signal the
-     * passive server has for a failed READ, since the FDC sends no error packet. */
-    if (drive == s_last_read_drive && track == s_last_read_track) {
-        stat_lock();
-        s_stats.read_retry++;
-        stat_unlock();
-    }
-    s_last_read_drive = drive;
-    s_last_read_track = track;
 
     esp_err_t err = disk_read_track(drive, track, len);
     if (err != ESP_OK) {
