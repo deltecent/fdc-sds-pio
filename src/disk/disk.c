@@ -20,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> /* strncasecmp */
+#include <unistd.h> /* fsync */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -69,7 +71,13 @@ static esp_err_t local_write_at(disk_backing_t *b, uint32_t off, const void *buf
     if (fwrite(buf, 1, len, lb->fp) != len) {
         return ESP_FAIL;
     }
-    return fflush(lb->fp) == 0 ? ESP_OK : ESP_FAIL;
+    /* fflush only hands the bytes to FatFs, which keeps a partial last sector in the
+     * file's own sector cache; fsync (f_sync) puts it on the card before WSTA OK, so a
+     * reset can't tear the sector that crosses the track's end (DESIGN.md §10). */
+    if (fflush(lb->fp) != 0) {
+        return ESP_FAIL;
+    }
+    return fsync(fileno(lb->fp)) == 0 ? ESP_OK : ESP_FAIL;
 }
 
 static uint32_t local_size(disk_backing_t *b)
@@ -175,6 +183,10 @@ typedef struct {
     bool            remote;    /* slot is a tnfs:// URL (mounted or not-ready) */
     bool            readonly;  /* remote opened O_RDONLY only (WRIT fails cleanly) */
     char            name[CONFIG_FILE_CAP];
+    /* A local image's name as the card stores it (sd_canonical: 8.3 short names), so
+     * a change to the file under another case or name is still seen
+     * (disk_change_begin). */
+    char            canon[2 * CONFIG_FILE_CAP];
     disk_backing_t *backing;
 } drive_t;
 
@@ -189,6 +201,15 @@ static struct {
 } s_cache;
 
 static SemaphoreHandle_t s_lock;
+
+/* Holds the mount table steady: taken by a local mount/unmount, and by a delete, rename
+ * or write-open of an SD file from disk_change_begin() to disk_change_end(), so a check
+ * that a file is not mounted stays true until the change is made. Separate from s_lock,
+ * so track I/O never waits on it. Recursive: disk_mount() calls disk_unmount(). */
+static SemaphoreHandle_t s_mount_lock;
+
+static inline void mount_lock(void)   { xSemaphoreTakeRecursive(s_mount_lock, portMAX_DELAY); }
+static inline void mount_unlock(void) { xSemaphoreGiveRecursive(s_mount_lock); }
 
 static inline bool drive_ok(int drive)
 {
@@ -549,6 +570,12 @@ esp_err_t disk_init(void)
             return ESP_ERR_NO_MEM;
         }
     }
+    if (!s_mount_lock) {
+        s_mount_lock = xSemaphoreCreateRecursiveMutex();
+        if (!s_mount_lock) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     if (!s_job_mtx) {
         s_job_mtx = xSemaphoreCreateMutex();
         if (!s_job_mtx) {
@@ -579,6 +606,7 @@ static esp_err_t remote_configure(int drive, const char *url)
 {
     disk_backing_t *old = NULL;
     bool old_remote = false;
+    mount_lock();
     lock();
     old = s_drv[drive].backing;
     old_remote = s_drv[drive].remote;
@@ -587,8 +615,10 @@ static esp_err_t remote_configure(int drive, const char *url)
     s_drv[drive].remote = true;
     s_drv[drive].readonly = false;
     strlcpy(s_drv[drive].name, url, sizeof s_drv[drive].name);
+    s_drv[drive].canon[0] = '\0';
     cache_drop_drive(drive);
     unlock();
+    mount_unlock();
     backing_dispose(old, old_remote);
 
     if (!net_is_connected()) {
@@ -614,16 +644,25 @@ esp_err_t disk_mount(int drive, const char *name)
     /* Local SD mount: open the new image first, then swap under the lock (fast, no
      * network). If it can't be opened, still drop whatever was mounted: a failed
      * `mount` must never silently leave the old disk in place, or the operator may act
-     * on the wrong disk (e.g. format it) believing the new one took. */
+     * on the wrong disk (e.g. format it) believing the new one took.
+     * The mount lock is held from the open to the table update, so a delete or rename
+     * of the file can't slip in between (disk_change_begin). */
     if (!sd_mounted()) {
         disk_unmount(drive);
         return ESP_ERR_INVALID_STATE;
     }
+    mount_lock();
     disk_backing_t *b = NULL;
     esp_err_t err = local_open(name, &b);
     if (err != ESP_OK) {
         disk_unmount(drive);
+        mount_unlock();
         return err;
+    }
+    char path[16 + CONFIG_FILE_CAP];
+    char canon[sizeof s_drv[0].canon];
+    if (sd_path(name, path, sizeof path) < 0 || sd_canonical(path, canon, sizeof canon) < 0) {
+        strlcpy(canon, name, sizeof canon); /* the open just worked; fall back to as-typed */
     }
 
     disk_backing_t *old = NULL;
@@ -636,9 +675,11 @@ esp_err_t disk_mount(int drive, const char *name)
     s_drv[drive].remote = false;
     s_drv[drive].readonly = false;
     strlcpy(s_drv[drive].name, name, sizeof s_drv[drive].name);
+    strlcpy(s_drv[drive].canon, canon, sizeof s_drv[drive].canon);
     cache_drop_drive(drive);
     uint32_t sz = b->size(b);
     unlock();
+    mount_unlock();
     backing_dispose(old, old_remote);
 
     ESP_LOGI(TAG, "drive %d mounted '%s' (%lu bytes)", drive, name, (unsigned long)sz);
@@ -652,6 +693,7 @@ esp_err_t disk_unmount(int drive)
     }
     disk_backing_t *old = NULL;
     bool old_remote = false;
+    mount_lock();
     lock();
     old = s_drv[drive].backing;
     old_remote = s_drv[drive].remote;
@@ -660,10 +702,55 @@ esp_err_t disk_unmount(int drive)
     s_drv[drive].remote = false;
     s_drv[drive].readonly = false;
     s_drv[drive].name[0] = '\0';
+    s_drv[drive].canon[0] = '\0';
     cache_drop_drive(drive);
     unlock();
+    mount_unlock();
     backing_dispose(old, old_remote);
     return ESP_OK;
+}
+
+void disk_unmount_all(void)
+{
+    if (!s_lock) {
+        return; /* disk_init never ran: nothing is mounted */
+    }
+    for (int d = 0; d < DISK_MAX_DRIVE; ++d) {
+        disk_unmount(d);
+    }
+}
+
+int disk_change_begin(const char *path)
+{
+    if (!s_mount_lock) {
+        return -1; /* disk_init never ran: nothing is mounted */
+    }
+    mount_lock();
+    char canon[2 * CONFIG_FILE_CAP];
+    int n = sd_canonical(path, canon, sizeof canon);
+    if (n < 0) {
+        return -1; /* not on the card (a new name): it can't be a mounted image */
+    }
+    for (int d = 0; d < DISK_MAX_DRIVE; ++d) {
+        const drive_t *dr = &s_drv[d];
+        if (!dr->mounted || dr->remote || !dr->canon[0]) {
+            continue;
+        }
+        /* The image itself, or a folder that holds it (the root holds every image). */
+        if (n == 0 || (strncasecmp(dr->canon, canon, (size_t)n) == 0 &&
+                       (dr->canon[n] == '\0' || dr->canon[n] == '/'))) {
+            mount_unlock();
+            return d;
+        }
+    }
+    return -1;
+}
+
+void disk_change_end(void)
+{
+    if (s_mount_lock) {
+        mount_unlock();
+    }
 }
 
 bool disk_is_mounted(int drive)

@@ -65,7 +65,8 @@ contents. `.pio/`, `.vscode/`, build artifacts, and `sdkconfig` are git-ignored.
 - Keep the pin map, protocol framing, and (if compatibility is chosen) the NVS schema
   identical to the contracts in DESIGN.md.
 
-## Git attribution
+## Git
 
-- Commit trailer: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+- No attribution of any kind in commits or PRs: no `Co-Authored-By`, no session
+  links, no "Generated with". Commits read as the owner's own.
 - Only commit/push when the owner asks.

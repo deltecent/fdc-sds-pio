@@ -30,3 +30,8 @@ are not.
   skips every leading-dot name, so FTP listings match the console `dir` rule
   (DESIGN.md §8.1/§8.4) and don't show host cruft (`._*`, `.fseventsd`,
   `.Spotlight-V100`). Dotfiles remain reachable by explicit name.
+- **Change guard.** `ftp_set_change_guard(begin, end)` installs a hook that `DELE`,
+  `RNTO` (on the old name) and every write-open (`STOR`, `APPE`) ask first, with the
+  full path. If `begin` returns false the command is answered `550 File in use by a
+  mounted drive`; otherwise the change is made and `end` is called. The glue uses it
+  to refuse changes to a mounted disk image (DESIGN.md §9.4/§10).

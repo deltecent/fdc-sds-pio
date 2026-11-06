@@ -39,12 +39,15 @@
  *     compile-time CONFIG_FTP_USER/CONFIG_FTP_PASSWORD Kconfig defines.
  *   - The serving root is set with ftp_set_root() (default "/sd", our SD mount).
  *   - ftp_buff_size is settable via ftp_set_buffer_size() before ftp_init().
+ *   - ftp_set_change_guard() lets the project refuse a delete, rename or write-open
+ *     (of a mounted disk image).
  *   - The example driver task ftp_task() and its extern globals were removed;
  *     the project supplies its own driver in src/net/ftp.c.
  */
 #ifndef FTP_H_
 #define FTP_H_
 
+#include <stdbool.h>
 #include <stdio.h>   /* FILE (ftp_data_t) */
 #include <dirent.h>  /* DIR  (ftp_data_t) */
 
@@ -234,6 +237,11 @@ void ftp_set_root (const char *root);
 
 /* Set the transfer buffer size in bytes. Only takes effect at the next ftp_init(). */
 void ftp_set_buffer_size (int size);
+
+/* Install a guard asked before a delete (DELE), rename (RNTO, on the old name) or
+ * write-open (STOR, APPE) of `fullname`. begin() returns true to allow the change, and
+ * end() is then called once it is made. A refusal is answered 550 with a reason. */
+void ftp_set_change_guard (bool (*begin)(const char *fullname), void (*end)(void));
 
 
 #endif /* FTP_H_ */

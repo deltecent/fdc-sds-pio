@@ -626,6 +626,9 @@ below **or** a raw POSIX `TZ` string (so non-US users are not locked out). Defau
     a small, local change kept in our `lib/` copy.
   - Fall back to a custom implementation only if the component proves unreliable at our
     image sizes (8 MB transfers).
+- **A mounted image is protected (§10).** `DELE`, `RNTO` and the write-opens `STOR`/`APPE`
+  of a mounted image (or `RNTO` of a folder that holds one) are answered `550 File in use
+  by a mounted drive`. Unmount the drive first. Reading (`RETR`) a mounted image works.
 
 ### 9.5 TNFS client (remote disk images) **[RESOLVED: in scope for v1]**
 
@@ -727,8 +730,11 @@ A Python client to test this server with is `deltecent/de-tnfs`
   reentrant; FTP already proves a second writer coexists with the FDC path) — the server
   does **not** take the `disk` module's track-buffer mutex, which guards only that buffer
   and the mounted images. Each `READ`/`WRITE` is a bounded ≤1 KB op, and the network wait
-  (`recvfrom`) is never inside an open file operation. Writing the card while a drive is
-  mounted from it is the owner's call, exactly as with FTP today.
+  (`recvfrom`) is never inside an open file operation. Writing other files while a drive is
+  mounted is the owner's call, exactly as with FTP. The mounted image itself is protected
+  (§10): `UNLINK`, `RENAME` (of the image or a folder that holds it) and an `OPEN` for write,
+  truncate or append are answered `EBUSY`. A read-only `OPEN` works, so a client that asks
+  for read/write can fall back to read-only.
 - **Module & wiring.** New `net/tnfs_server` (`src/net/tnfs_server.c` +
   `include/tnfs_server.h`) exposing `net_tnfsd_start()` in the mold of `net_ftp_start()`
   (§9.4): a link-gated task on core 0, started from `net_init()` only when
@@ -781,6 +787,24 @@ board with `connect = "socket:<esp-ip>:<port>"`, in addition to the UART.
   leading `/` — Increase to 64 characters.
 - Image handle opened `r+` at mount, kept open for the mount lifetime; READ/WRIT seek
   and transfer on the open handle; unmount closes it.
+- **A WRIT is on the card before its `WSTA OK`.** Each track write is `fflush`ed and
+  `fsync`ed (FatFs `f_sync`) before the reply. A track is generally not a multiple of
+  the 512-byte card sector, so without the sync the end of a track can sit in the file's
+  own sector cache, and a reset or power loss tears the sector that crosses that
+  boundary. Every drive is also unmounted (images closed) before a planned restart
+  (`reboot`, OTA).
+- **A mounted image may not be deleted, renamed, or opened for write by anything else.**
+  FatFs is built without file locking (`CONFIG_FATFS_FS_LOCK=0`), so it would allow it.
+  The SDS would keep writing through its open handle to clusters that the card has freed,
+  or has given to a new file, and damage files the owner never touched. So the CLI
+  (`delete`, `rename`, `copy` to it), FTP (§9.4) and the TNFS server (§9.6) refuse the
+  change: "`<name>: in use by drive <n>, unmount it first`" on the console. A folder that
+  holds a mounted image can't be renamed either. Names are compared as the card stores
+  them: each path component's 8.3 short name, so any case and either the long or the
+  short name match. The check and the change run under one
+  mount-table lock (not the track-I/O lock), so a `mount` can't slip between them.
+  Remote (`tnfs://`) drives are not SD files and are not checked. Reading a mounted image
+  (`type`, `copy` from it, FTP `RETR`) still works.
 - `firmware.bin` in root is the image `update local` flashes (§11).
 - `SDCARD/` in this repo mirrors intended card contents: CP/M 2.2 (8 MB + standard),
   CP/M 3, Disk/Timeshare BASIC, AltairDOS, Lifeboat, Games, Zork, a blank 8 MB image,

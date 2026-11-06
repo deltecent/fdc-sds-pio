@@ -21,6 +21,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "disk.h"
 #include "ftp.h"
 #include "ftpserver.h"
 #include "net.h"
@@ -31,6 +32,13 @@ static const char *TAG = "ftp";
 /* Widen the vendored 1 KB default so an 8 MB image doesn't crawl (one buffer is
  * moved per ftp_run() tick). 4 KB keeps RAM modest while cutting the tick count. */
 #define FTP_XFER_BUF 4096
+
+/* Change guard (DESIGN.md §9.4/§10): FTP may not delete, rename or overwrite a mounted
+ * image. Allowed changes run with the mount table held (disk_change_begin). */
+static bool guard_begin(const char *fullname)
+{
+    return disk_change_begin(fullname) < 0;
+}
 
 static uint64_t now_ms(void)
 {
@@ -47,6 +55,7 @@ static void ftp_task(void *arg)
         ftp_set_root(SD_MOUNT_POINT);
         ftp_set_credentials(cfg->ftp_user, cfg->ftp_pass);
         ftp_set_buffer_size(FTP_XFER_BUF);
+        ftp_set_change_guard(guard_begin, disk_change_end);
 
         if (!ftp_init()) {
             ESP_LOGE(TAG, "ftp_init failed (out of memory?)");

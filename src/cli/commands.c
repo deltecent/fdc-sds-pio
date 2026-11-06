@@ -335,6 +335,22 @@ static bool resolve(cli_console_t *c, const char *name, char *buf, size_t len)
     return true;
 }
 
+/*
+ * Start a change (delete, rename, write-open) to the SD file at `path` (as resolved
+ * from `name`). Refuses with a message if it is a mounted image or a folder that holds
+ * one (DESIGN.md §10); otherwise returns true with the mount table held, and the
+ * caller must call disk_change_end() once the change is made.
+ */
+static bool change_begin(cli_console_t *c, const char *name, const char *path)
+{
+    int d = disk_change_begin(path);
+    if (d >= 0) {
+        cli_printf(c, "%s: in use by drive %d, unmount it first\r\n", name, d);
+        return false;
+    }
+    return true;
+}
+
 /* ---- handlers -------------------------------------------------------------- */
 
 /* cmd_help is defined at the end of the file so it can list the live baud/log/tz
@@ -353,6 +369,7 @@ static int cmd_reboot(cli_console_t *c, int argc, char **argv)
     (void)argc;
     (void)argv;
     cli_write(c, "Rebooting...\r\n");
+    disk_unmount_all(); /* close the images so no written data is left in RAM (§10) */
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the message flush before reset */
     esp_restart();
     return 0; /* not reached */
@@ -842,8 +859,14 @@ static int cmd_delete(cli_console_t *c, int argc, char **argv)
     if (!resolve(c, argv[1], path, sizeof path)) {
         return 1;
     }
-    if (unlink(path) != 0) {
-        cli_printf(c, "%s: %s\r\n", argv[1], strerror(errno));
+    if (!change_begin(c, argv[1], path)) {
+        return 1;
+    }
+    int r = unlink(path);
+    int e = errno;
+    disk_change_end();
+    if (r != 0) {
+        cli_printf(c, "%s: %s\r\n", argv[1], strerror(e));
         return 1;
     }
     cli_printf(c, "deleted %s\r\n", argv[1]);
@@ -901,8 +924,14 @@ static int cmd_rename(cli_console_t *c, int argc, char **argv)
         !resolve(c, argv[2], to, sizeof to)) {
         return 1;
     }
-    if (rename(from, to) != 0) {
-        cli_printf(c, "rename: %s\r\n", strerror(errno));
+    if (!change_begin(c, argv[1], from)) {
+        return 1;
+    }
+    int r = rename(from, to);
+    int e = errno;
+    disk_change_end();
+    if (r != 0) {
+        cli_printf(c, "rename: %s\r\n", strerror(e));
         return 1;
     }
     cli_printf(c, "renamed %s -> %s\r\n", argv[1], argv[2]);
@@ -933,9 +962,14 @@ static bool copy_open_dest(cli_console_t *c, const char *name, bool remote,
     if (!resolve(c, name, path, sizeof path)) {
         return false;
     }
+    if (!change_begin(c, name, path)) {
+        return false;
+    }
     *sf = fopen(path, "wb");
+    int e = errno;
+    disk_change_end();
     if (!*sf) {
-        cli_printf(c, "%s: %s\r\n", name, strerror(errno));
+        cli_printf(c, "%s: %s\r\n", name, strerror(e));
         return false;
     }
     return true;

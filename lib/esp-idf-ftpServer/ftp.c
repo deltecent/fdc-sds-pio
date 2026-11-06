@@ -65,6 +65,34 @@ const char *FTP_TAG = "[Ftp]";
 const char *MOUNT_POINT = "/sd";
 
 static uint8_t ftp_stop = 0;
+
+/* Change guard (ftp_set_change_guard): asked before a delete, rename or write-open. */
+static bool (*ftp_guard_begin)(const char *fullname) = NULL;
+static void (*ftp_guard_end)(void) = NULL;
+static bool ftp_guard_refused = false; /* the last guard check said no */
+#define FTP_GUARD_MSG "File in use by a mounted drive"
+
+/* Ask the guard whether `fullname` may change. True = go ahead, then ftp_change_end(). */
+static bool ftp_change_begin (const char *fullname) {
+	ftp_guard_refused = false;
+	if (ftp_guard_begin && !ftp_guard_begin(fullname)) {
+		ESP_LOGW(FTP_TAG, "refused: %s is in use by a mounted drive", fullname);
+		ftp_guard_refused = true;
+		return false;
+	}
+	return true;
+}
+
+static void ftp_change_end (void) {
+	if (ftp_guard_begin && ftp_guard_end) {
+		ftp_guard_end();
+	}
+}
+
+/* Text for a 550 reply: why the guard refused, or none for any other failure. */
+static char *ftp_fail_msg (void) {
+	return ftp_guard_refused ? FTP_GUARD_MSG : NULL;
+}
 char ftp_user[FTP_USER_PASS_LEN_MAX + 1];
 char ftp_pass[FTP_USER_PASS_LEN_MAX + 1];
 
@@ -108,7 +136,15 @@ static bool ftp_open_file (const char *path, const char *mode) {
 	strcat(fullname, path);
 	ESP_LOGI(FTP_TAG, "ftp_open_file: fullname=[%s]", fullname);
 	//ftp_data.fp = fopen(path, mode);
+	bool writes = (mode[0] != 'r') || (strchr(mode, '+') != NULL);
+	ftp_guard_refused = false;
+	if (writes && !ftp_change_begin(fullname)) {
+		return false;
+	}
 	ftp_data.fp = fopen(fullname, mode);
+	if (writes) {
+		ftp_change_end();
+	}
 	if (ftp_data.fp == NULL) {
 		ESP_LOGE(FTP_TAG, "ftp_open_file: open fail [%s]", fullname);
 		return false;
@@ -923,7 +959,7 @@ static void ftp_process_cmd (void) {
 				}
 				else {
 					ftp_data.state = E_FTP_STE_END_TRANSFER;
-					ftp_send_reply(550, NULL);
+					ftp_send_reply(550, ftp_fail_msg());
 				}
 			}
 			else {
@@ -944,7 +980,7 @@ static void ftp_process_cmd (void) {
 				}
 				else {
 					ftp_data.state = E_FTP_STE_END_TRANSFER;
-					ftp_send_reply(550, NULL);
+					ftp_send_reply(550, ftp_fail_msg());
 				}
 			}
 			else {
@@ -961,11 +997,18 @@ static void ftp_process_cmd (void) {
 				ESP_LOGI(FTP_TAG, "E_FTP_CMD_DELE fullname=[%s]", fullname);
 
 				//if (unlink(ftp_path) == 0) {
-				if (unlink(fullname) == 0) {
-					vTaskDelay(20 / portTICK_PERIOD_MS);
-					ftp_send_reply(250, NULL);
+				if (!ftp_change_begin(fullname)) {
+					ftp_send_reply(550, ftp_fail_msg());
 				}
-				else ftp_send_reply(550, NULL);
+				else {
+					int res_del = unlink(fullname);
+					ftp_change_end();
+					if (res_del == 0) {
+						vTaskDelay(20 / portTICK_PERIOD_MS);
+						ftp_send_reply(250, NULL);
+					}
+					else ftp_send_reply(550, NULL);
+				}
 			}
 			else ftp_send_reply(250, NULL);
 			break;
@@ -1030,10 +1073,16 @@ static void ftp_process_cmd (void) {
 			ESP_LOGI(FTP_TAG, "E_FTP_CMD_RNTO fullname2=[%s]", fullname2);
 
 			//if (rename((char *)ftp_data.dBuffer, ftp_path) == 0) {
-			if (rename(fullname, fullname2) == 0) {
-				ftp_send_reply(250, NULL);
+			if (!ftp_change_begin(fullname)) {
+				ftp_send_reply(550, ftp_fail_msg());
 			} else {
-				ftp_send_reply(550, NULL);
+				int res_ren = rename(fullname, fullname2);
+				ftp_change_end();
+				if (res_ren == 0) {
+					ftp_send_reply(250, NULL);
+				} else {
+					ftp_send_reply(550, NULL);
+				}
 			}
 			break;
 		case E_FTP_CMD_NOOP:
@@ -1382,6 +1431,13 @@ void ftp_set_root (const char *root) {
 	if (root && root[0]) {
 		MOUNT_POINT = root;
 	}
+}
+
+/* Install the change guard: `begin(fullname)` is asked before a delete, rename or
+ * write-open and returns true to allow it; `end()` is called once the change is made. */
+void ftp_set_change_guard (bool (*begin)(const char *fullname), void (*end)(void)) {
+	ftp_guard_begin = begin;
+	ftp_guard_end = end;
 }
 
 /* Set the transfer buffer size; only read at the next ftp_init(). */
