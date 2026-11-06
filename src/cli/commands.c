@@ -772,33 +772,44 @@ static int cmd_dump(cli_console_t *c, int argc, char **argv)
      * it. Until the FDC engine lands (M4) — and to cross-check offset math against
      * `xxd` — `dump [drive [track [len]]]` reads a track first (defaults: drive 0,
      * track 0, 256 bytes). Bare `dump` shows the current buffer, or reads the default
-     * if the buffer is still empty.
+     * if the buffer is still empty. It copies into its own buffer, so it never touches
+     * the track the FDC path is sending.
      */
-    if (argc > 1) {
-        int drive = parse_drive(c, argv[1]);
-        if (drive < 0) {
-            return 1;
-        }
-        uint32_t track = (argc > 2) ? (uint32_t)strtoul(argv[2], NULL, 0) : 0;
-        size_t len = (argc > 3) ? (size_t)strtoul(argv[3], NULL, 0) : DUMP_DEFAULT_LEN;
-        esp_err_t err = disk_read_track(drive, track, len);
-        if (err != ESP_OK) {
-            cli_printf(c, "dump: read failed: %s\r\n", esp_err_to_name(err));
-            return 1;
-        }
+    uint8_t *buf = malloc(DISK_TRACK_BUF_SIZE);
+    if (!buf) {
+        cli_write(c, "dump: out of memory\r\n");
+        return 1;
     }
-
     int drive;
     uint32_t track;
     size_t len;
-    const uint8_t *buf = disk_track_buffer(&drive, &track, &len);
-    if (len == 0) {
-        /* Nothing cached and no args — read the default track from drive 0. */
-        if (disk_read_track(0, 0, DUMP_DEFAULT_LEN) != ESP_OK) {
-            cli_write(c, "dump: no track loaded (mount a drive first)\r\n");
+    if (argc > 1) {
+        drive = parse_drive(c, argv[1]);
+        if (drive < 0) {
+            free(buf);
             return 1;
         }
-        buf = disk_track_buffer(&drive, &track, &len);
+        track = (argc > 2) ? (uint32_t)strtoul(argv[2], NULL, 0) : 0;
+        len = (argc > 3) ? (size_t)strtoul(argv[3], NULL, 0) : DUMP_DEFAULT_LEN;
+        esp_err_t err = disk_read_track(drive, track, len, buf);
+        if (err != ESP_OK) {
+            cli_printf(c, "dump: read failed: %s\r\n", esp_err_to_name(err));
+            free(buf);
+            return 1;
+        }
+    } else {
+        disk_copy_track_buffer(buf, &drive, &track, &len);
+        if (len == 0) {
+            /* Nothing cached: read the default track from drive 0. */
+            drive = 0;
+            track = 0;
+            len = DUMP_DEFAULT_LEN;
+            if (disk_read_track(drive, track, len, buf) != ESP_OK) {
+                cli_write(c, "dump: no track loaded (mount a drive first)\r\n");
+                free(buf);
+                return 1;
+            }
+        }
     }
 
     cli_printf(c, "drive %d track %lu, %lu bytes:\r\n", drive, (unsigned long)track,
@@ -807,6 +818,7 @@ static int cmd_dump(cli_console_t *c, int argc, char **argv)
         size_t n = (len - off < 16) ? (len - off) : 16;
         dump_line(c, (uint32_t)off, buf + off, n);
     }
+    free(buf);
     return 0;
 }
 

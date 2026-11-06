@@ -816,9 +816,22 @@ static esp_err_t check_track(int drive, uint32_t track, size_t len)
     return ESP_OK;
 }
 
-esp_err_t disk_read_track(int drive, uint32_t track, size_t len)
+/* Copy the cached track to dst if it is exactly (drive, track, len). Caller holds the
+ * lock. Every reader copies out under the lock, so no task ever reads s_track_buf
+ * while another (the CLI, a late remote job) fills it. */
+static bool cache_copy_out(int drive, uint32_t track, size_t len, void *dst)
 {
-    if (!s_lock) {
+    if (s_cache.valid && s_cache.drive == drive && s_cache.track == track &&
+        s_cache.len == len) {
+        memcpy(dst, s_track_buf, len);
+        return true;
+    }
+    return false;
+}
+
+esp_err_t disk_read_track(int drive, uint32_t track, size_t len, void *dst)
+{
+    if (!s_lock || !dst) {
         return ESP_ERR_INVALID_STATE;
     }
     lock();
@@ -829,18 +842,27 @@ esp_err_t disk_read_track(int drive, uint32_t track, size_t len)
     }
 
     /* Cache hit: the shared buffer already holds this exact track. */
-    if (s_cache.valid && s_cache.drive == drive && s_cache.track == track &&
-        s_cache.len == len) {
+    if (cache_copy_out(drive, track, len, dst)) {
         unlock();
         return ESP_OK;
     }
 
     /* Remote: hand off to the worker (core 0) so the fdc task never blocks on the
-     * network under the lock (§5.2/§9.5). The worker fills s_track_buf + cache. */
+     * network under the lock (§5.2/§9.5). The worker fills s_track_buf + cache; copy
+     * it out under the lock, and only if the cache still holds this track (another
+     * read may have replaced it since the worker finished). */
     if (s_drv[drive].remote) {
         unlock();
-        return rjob_post_wait(rjob_new_io(RJOB_READ, drive, track, len, NULL),
-                              REMOTE_OP_WAIT_MS);
+        err = rjob_post_wait(rjob_new_io(RJOB_READ, drive, track, len, NULL),
+                             REMOTE_OP_WAIT_MS);
+        if (err == ESP_OK) {
+            lock();
+            if (!cache_copy_out(drive, track, len, dst)) {
+                err = ESP_ERR_INVALID_STATE; /* gone: no reply, the FDC asks again */
+            }
+            unlock();
+        }
+        return err;
     }
 
     /* Local: read inline under the lock (fast SD I/O). */
@@ -851,6 +873,7 @@ esp_err_t disk_read_track(int drive, uint32_t track, size_t len)
         s_cache.drive = drive;
         s_cache.track = track;
         s_cache.len = len;
+        memcpy(dst, s_track_buf, len);
     } else {
         s_cache.valid = false;
     }
@@ -896,9 +919,19 @@ esp_err_t disk_write_track(int drive, uint32_t track, size_t len, const void *da
     return err;
 }
 
-const uint8_t *disk_track_buffer(int *drive_out, uint32_t *track_out, size_t *len_out)
+void disk_copy_track_buffer(void *dst, int *drive_out, uint32_t *track_out,
+                            size_t *len_out)
 {
+    if (!s_lock) {
+        if (len_out) {
+            *len_out = 0;
+        }
+        return;
+    }
     lock();
+    if (s_cache.valid && dst) {
+        memcpy(dst, s_track_buf, s_cache.len);
+    }
     if (drive_out) {
         *drive_out = s_cache.valid ? s_cache.drive : -1;
     }
@@ -909,7 +942,6 @@ const uint8_t *disk_track_buffer(int *drive_out, uint32_t *track_out, size_t *le
         *len_out = s_cache.valid ? s_cache.len : 0;
     }
     unlock();
-    return s_track_buf;
 }
 
 /* ---- remote lifecycle (WiFi up/down) --------------------------------------- */

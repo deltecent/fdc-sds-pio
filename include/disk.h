@@ -90,12 +90,15 @@ uint32_t disk_image_size(int drive);
 uint16_t disk_status_bitmap(void);
 
 /*
- * Read `len` bytes of `track` from `drive` into the shared track buffer (served by a
- * cache hit when the last read matched). `len` must be 1..DISK_TRACK_BUF_SIZE and the
- * whole track must fit inside the image. Returns ESP_ERR_INVALID_STATE if not mounted,
- * ESP_ERR_INVALID_SIZE if out of range/too big, ESP_FAIL on an I/O error.
+ * Read `len` bytes of `track` from `drive` and copy them to `dst` (at least `len`
+ * bytes, owned by the caller). The read goes through the shared track buffer and its
+ * 1-entry cache, and the copy is made under the disk lock, so `dst` can't be changed by
+ * another task's track I/O afterwards. `len` must be 1..DISK_TRACK_BUF_SIZE and the
+ * whole track must fit inside the image. Returns ESP_ERR_INVALID_STATE if not mounted
+ * (or if a remote drive was unmounted during the read), ESP_ERR_INVALID_SIZE if out of
+ * range/too big, ESP_FAIL on an I/O error.
  */
-esp_err_t disk_read_track(int drive, uint32_t track, size_t len);
+esp_err_t disk_read_track(int drive, uint32_t track, size_t len, void *dst);
 
 /*
  * Write `len` bytes of `data` to `track` on `drive`, then refresh the track buffer +
@@ -104,11 +107,13 @@ esp_err_t disk_read_track(int drive, uint32_t track, size_t len);
 esp_err_t disk_write_track(int drive, uint32_t track, size_t len, const void *data);
 
 /*
- * Borrow the shared track buffer (what `dump` shows and the FDC READ path sends). On
- * return drive_out and track_out identify the cached track and len_out its length (0 if
- * nothing has been read yet). The pointer is valid until the next track I/O call.
+ * Copy the cached track (the last one read or written) to `dst`, which holds at least
+ * DISK_TRACK_BUF_SIZE bytes, under the disk lock. On return drive_out and track_out
+ * identify it and len_out is its length, 0 (and nothing copied) if nothing is cached.
+ * `dump` uses this to show the buffer without the FDC path changing it mid-print.
  */
-const uint8_t *disk_track_buffer(int *drive_out, uint32_t *track_out, size_t *len_out);
+void disk_copy_track_buffer(void *dst, int *drive_out, uint32_t *track_out,
+                            size_t *len_out);
 
 /*
  * Boot auto-mount (DESIGN.md §12 step 5): mount each drive whose config Drive<n> is a

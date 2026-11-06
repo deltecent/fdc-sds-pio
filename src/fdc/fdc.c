@@ -108,7 +108,8 @@ static char          s_tcp_pending_peer[sizeof ((fdc_stats_t *)0)->tcp_peer];
 static int           s_tcp_fd = -1;
 static bool          s_tcp_dead;     /* I/O on s_tcp_fd failed; drop at next poll */
 
-/* Receive scratch: one command block + one full write track. */
+/* Scratch: one command block + one full track. s_data receives WRIT data and holds the
+ * READ copy; the fdc task runs one command at a time, so the two never overlap. */
 static uint8_t s_cmd[FDC_BLOCK_LEN];
 static uint8_t s_resp[FDC_BLOCK_LEN];
 static uint8_t s_data[DISK_TRACK_BUF_SIZE];
@@ -363,7 +364,10 @@ static void handle_read(void)
 
     led_drive_select(drive);
 
-    esp_err_t err = disk_read_track(drive, track, len);
+    /* Copy the track into s_data, which only this task uses. The shared track buffer
+     * can be refilled by the CLI (`dump`) or a late remote job once the disk lock is
+     * released, so it must not be sent from directly. */
+    esp_err_t err = disk_read_track(drive, track, len, s_data);
     if (err != ESP_OK) {
         /* Passive responder: no reply on a not-ready/out-of-range READ; FDC retries. */
         stat_lock();
@@ -373,15 +377,10 @@ static void handle_read(void)
         return;
     }
 
-    int      d;
-    uint32_t t;
-    size_t   l;
-    const uint8_t *buf = disk_track_buffer(&d, &t, &l);
-
     /* Payload = <len> data bytes followed by their 16-bit LE checksum (§6.2). */
-    link_send(buf, len);
+    link_send(s_data, len);
     uint8_t ck[FDC_CHECKSUM_LEN];
-    fdc_write_le16(ck, fdc_checksum16(buf, len));
+    fdc_write_le16(ck, fdc_checksum16(s_data, len));
     link_send(ck, sizeof ck);
 
     stat_lock();
