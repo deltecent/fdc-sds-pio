@@ -12,6 +12,14 @@
  *   WRIT  -> reply "WRIT" OK/NOT_READY; if OK, receive <len> data + checksum, write it,
  *            then reply "WSTA" with the final code (0 OK / 2 checksum / 3 write error).
  *
+ * The FDC+ waits one second after the last byte it sends for the whole reply (FDC
+ * Serial Server Protocol, ERROR RECOVERY), then sends the command again. A reply that
+ * misses that window is worse than none: a READ reply has no header, so the FDC+
+ * takes a late track as the reply to its retry, and the server's answer to the queued
+ * retry then lands in a later receive. So a remote (TNFS) READ or WSTA that can't go
+ * out in time is not sent at all; the remote I/O finishes in the background and the
+ * retry is served from the track cache (DESIGN.md §10.1).
+ *
  * All offset/length math is 32-bit and lives in protocol.h/disk.c (the old firmware's
  * signed-int track bug is called out in DESIGN.md §6.5). SD track I/O goes through the
  * `disk` module's mutex, so the CLI/FTP paths never collide with this task on the card.
@@ -47,6 +55,10 @@ static const char *TAG = "fdc";
 
 /* Per-call receive windows (DESIGN.md §6.4): ~1 s for a command, ~7 s for track data. */
 #define FDC_CMD_TIMEOUT_MS   1000
+/* The FDC+ gives the whole reply this long after the last byte it sent (see above). */
+#define FDC_REPLY_WINDOW_MS  1000
+/* Slack inside that window for UART RX latency, scheduling and the FDC's own timer. */
+#define FDC_REPLY_MARGIN_MS  100
 #define FDC_DATA_TIMEOUT_MS  7000
 /* Idle RX poll: how often the task wakes to apply a baud change / loopback request. */
 #define FDC_IDLE_POLL_MS      200
@@ -87,6 +99,8 @@ static QueueHandle_t      s_uart_evt_q;
 /* Live baud + a pending change queued by fdc_set_baud(), applied by the task. */
 static uint32_t          s_baud;
 static volatile uint32_t s_pending_baud;
+/* When the last byte of the FDC+'s current command or data block arrived. */
+static int64_t           s_rx_done_us;
 
 /* Stats, guarded so the CLI can read them while the task writes. */
 static fdc_stats_t       s_stats;
@@ -319,6 +333,36 @@ static void link_flush_input(void)
     }
 }
 
+/* True if the FDC+ has already sent more bytes, i.e. it gave up on the reply and
+ * retried. Sending the reply now would desync the link. */
+static bool link_input_pending(void)
+{
+    if (on_tcp()) {
+        uint8_t b;
+        return recv(s_tcp_fd, &b, 1, MSG_PEEK | MSG_DONTWAIT) > 0;
+    }
+    size_t n = 0;
+    return uart_get_buffered_data_len(s_port, &n) == ESP_OK && n > 0;
+}
+
+/*
+ * How long a reply of `reply_bytes` may still be prepared and arrive inside the FDC+'s
+ * window: the window, less the margin, the time already spent since s_rx_done_us, and
+ * the time to send the reply at the current baud (0 when it is 0 or less). Over TCP the
+ * send time is taken as 0.
+ */
+static uint32_t reply_budget_ms(size_t reply_bytes)
+{
+    int64_t xfer_ms = 0;
+    if (!on_tcp() && s_baud > 0) {
+        /* 10 bits a byte on the wire (start + 8 data + stop), rounded up. */
+        xfer_ms = ((int64_t)reply_bytes * 10 * 1000 + s_baud - 1) / s_baud;
+    }
+    int64_t spent_ms = (esp_timer_get_time() - s_rx_done_us) / 1000;
+    int64_t left = FDC_REPLY_WINDOW_MS - FDC_REPLY_MARGIN_MS - xfer_ms - spent_ms;
+    return (left > 0) ? (uint32_t)left : 0;
+}
+
 /* Build a 10-byte response block (mnemonic + two words + checksum) into s_resp. */
 static void build_resp(const char cmd[FDC_CMD_LEN], uint16_t word1, uint16_t word2)
 {
@@ -367,7 +411,20 @@ static void handle_read(void)
     /* Copy the track into s_data, which only this task uses. The shared track buffer
      * can be refilled by the CLI (`dump`) or a late remote job once the disk lock is
      * released, so it must not be sent from directly. */
-    esp_err_t err = disk_read_track(drive, track, len, s_data);
+    esp_err_t err = disk_read_track(drive, track, len, s_data,
+                                    reply_budget_ms((size_t)len + FDC_CHECKSUM_LEN));
+    if (err == ESP_OK && link_input_pending()) {
+        err = ESP_ERR_NOT_FINISHED; /* the FDC+ already retried: this reply is late */
+    }
+    if (err == ESP_ERR_NOT_FINISHED) {
+        /* Remote track not ready in time: no reply. The read finishes in the
+         * background and fills the cache for the FDC+'s retry. */
+        stat_lock();
+        s_stats.late++;
+        stat_unlock();
+        set_last_op("READ d%d t%u len%u late", drive, track, len);
+        return;
+    }
     if (err != ESP_OK) {
         /* Passive responder: no reply on a not-ready/out-of-range READ; FDC retries. */
         stat_lock();
@@ -431,15 +488,36 @@ static void handle_writ(void)
         set_last_op("WRIT d%d t%u len%u csum-timeout", drive, track, len);
         return;
     }
+    s_rx_done_us = esp_timer_get_time(); /* the WSTA window starts at the data's end */
 
-    uint8_t code;
     if (fdc_read_le16(ck) != fdc_checksum16(s_data, len)) {
-        code = FDC_RESP_CSUM_ERR; /* bad write data -> code 2, not silent (§6.4) */
         stat_lock();
         s_stats.data_csum++;
         stat_unlock();
         set_last_op("WRIT d%d t%u len%u csum-err", drive, track, len);
-    } else if (disk_write_track(drive, track, len, s_data) != ESP_OK) {
+        build_resp("WSTA", FDC_RESP_CSUM_ERR, 0); /* bad write data -> code 2 (§6.4) */
+        link_send(s_resp, FDC_BLOCK_LEN);
+        return;
+    }
+
+    esp_err_t err = disk_write_track(drive, track, len, s_data,
+                                     reply_budget_ms(FDC_BLOCK_LEN));
+    if (err == ESP_OK && link_input_pending()) {
+        err = ESP_ERR_NOT_FINISHED; /* the FDC+ already retried: this WSTA is late */
+    }
+    if (err == ESP_ERR_NOT_FINISHED) {
+        /* Remote write not done in time: no WSTA. The write finishes in the
+         * background, and the retried WRIT of the same data is acknowledged from the
+         * cache without going back to the server. */
+        stat_lock();
+        s_stats.late++;
+        stat_unlock();
+        set_last_op("WRIT d%d t%u len%u late", drive, track, len);
+        return;
+    }
+
+    uint8_t code;
+    if (err != ESP_OK) {
         code = FDC_RESP_WRITE_ERR;
         stat_lock();
         s_stats.not_ready++;
@@ -729,6 +807,8 @@ static void fdc_task(void *arg)
             stat_unlock();
             continue;
         }
+
+        s_rx_done_us = esp_timer_get_time(); /* the reply window starts here */
 
         /* Ignore a bad command checksum (the FDC will retry), §6.4. */
         if (!fdc_block_valid(s_cmd)) {

@@ -45,7 +45,11 @@ static const char *TAG = "tnfsd";
 #define TNFSD_MAX_SESSIONS 2
 #define TNFSD_MAX_FILES    4          /* open files per session */
 #define TNFSD_MAX_DIRS     2          /* open directories per session */
-#define TNFSD_IDLE_US      (30LL * 1000000) /* reap a session after ~30 s idle */
+#define TNFSD_IDLE_US      (600LL * 1000000) /* reap a session after 10 min idle (as tnfsd) */
+/* With every slot taken, a new MOUNT takes over the session idle longest, if it has
+ * been idle at least this long. A client that went away without UMOUNT then holds its
+ * slot for 30 s, not the full idle limit. */
+#define TNFSD_EVICT_IDLE_US (30LL * 1000000)
 #define TNFSD_RECV_MS      1000       /* socket timeout, so the loop reaps + checks link */
 #define TNFSD_MIN_RETRY_MS 1000       /* min-retry timeout advertised to clients in MOUNT */
 
@@ -162,14 +166,35 @@ static void free_session(session_t *s)
 
 static session_t *alloc_session(void)
 {
+    session_t *oldest = NULL;
     for (int i = 0; i < TNFSD_MAX_SESSIONS; ++i) {
         if (!s_sessions[i].in_use) {
             free_session(&s_sessions[i]); /* zero + set fds to -1 */
             s_sessions[i].in_use = true;
             return &s_sessions[i];
         }
+        if (!oldest || s_sessions[i].last_active_us < oldest->last_active_us) {
+            oldest = &s_sessions[i];
+        }
+    }
+    if (oldest && (now_us() - oldest->last_active_us) >= TNFSD_EVICT_IDLE_US) {
+        ESP_LOGI(TAG, "session %u evicted (idle, slots full)", oldest->sid);
+        free_session(oldest);
+        oldest->in_use = true;
+        return oldest;
     }
     return NULL;
+}
+
+/* True if some session has id `sid` (whatever its peer). */
+static bool sid_in_use(uint16_t sid)
+{
+    for (int i = 0; i < TNFSD_MAX_SESSIONS; ++i) {
+        if (s_sessions[i].in_use && s_sessions[i].sid == sid) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void drop_all_sessions(void)
@@ -970,7 +995,18 @@ static void serve(void)
         }
         session_t *s = find_session(sid, &peer);
         if (!s) {
-            continue; /* unknown/expired session — ignore (client will re-MOUNT) */
+            /* Unknown or expired session: say so, as tnfsd does, so the client can
+             * MOUNT again at once rather than time out. A known id from another peer
+             * is ignored, also as tnfsd does. */
+            if (!sid_in_use(sid)) {
+                uint8_t r[TNFS_HDR_LEN + 1];
+                tnfs_wr16(r, sid);
+                r[2] = seq;
+                r[3] = cmd;
+                r[4] = TNFS_EBADSESSION;
+                sendto(s_sock, r, sizeof r, 0, (struct sockaddr *)&peer, sizeof peer);
+            }
+            continue;
         }
         if (s->have_reply && s->last_seq == seq && s->last_cmd == cmd) {
             /* Duplicate request (lost reply): replay verbatim, do NOT re-run it. */

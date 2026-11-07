@@ -18,7 +18,12 @@
  *
  * One tnfs_file_t owns one socket + session + open fd and carries its own request
  * and response buffers (on the heap, not the caller's stack), so nested calls stay
- * shallow. There is no sharing between sessions, so no locking here — callers
+ * shallow.
+ *
+ * A server may drop a session at any time: it reaps idle sessions, or it restarts.
+ * So a READ/WRITE that fails is retried once on a new session: MOUNT and OPEN again
+ * over the same transport, then repeat the chunk (issue #7). A chunk is a positioned
+ * read or write of fixed bytes, so repeating it is safe. There is no sharing between sessions, so no locking here — callers
  * serialize access (the SD mutex for a mounted drive; single-threaded copy).
  */
 #include <string.h>
@@ -51,6 +56,11 @@ struct tnfs_file {
     uint32_t size;       /* file size captured at open */
     uint32_t pos;        /* server-side file position (to elide redundant LSEEKs) */
     bool     pos_valid;
+    /* What tnfs_reconnect() needs to open the same file again. */
+    char     host[64];
+    uint16_t port;
+    char     path[160];
+    uint16_t flags;      /* OPEN flags, less CREAT/TRUNC after the first open */
     size_t   resp_len;   /* length of the last response in resp[] */
     uint8_t  req[TNFS_MSG_CAP];
     uint8_t  resp[TNFS_MSG_CAP];
@@ -205,6 +215,9 @@ static esp_err_t tnfs_command(tnfs_file_t *f, uint8_t cmd, size_t plen)
 {
     if (TNFS_HDR_LEN + plen > sizeof f->req) {
         return ESP_ERR_INVALID_SIZE;
+    }
+    if (f->sock < 0) {
+        return ESP_ERR_INVALID_STATE; /* a reconnect failed; the next call tries again */
     }
     uint8_t s = f->seq;
     wr16(f->req, f->conn);
@@ -377,6 +390,60 @@ static esp_err_t tnfs_try(tnfs_file_t *f, const char *host, uint16_t port, bool 
     return err;
 }
 
+/* OPEN f->path with `flags` on the current session; on success stores the remote fd. */
+static esp_err_t tnfs_open_path(tnfs_file_t *f, uint16_t flags)
+{
+    size_t path_len = strlen(f->path) + 1;
+    if (4 + path_len > sizeof f->req - TNFS_HDR_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    wr16(&f->req[TNFS_HDR_LEN + 0], flags);
+    wr16(&f->req[TNFS_HDR_LEN + 2], 0x01A4); /* mode 0644 for a created file */
+    memcpy(&f->req[TNFS_HDR_LEN + 4], f->path, path_len);
+
+    esp_err_t err = tnfs_command(f, TNFS_OPEN, 4 + path_len);
+    if (err == ESP_OK) {
+        err = status_err(f->resp[TNFS_STATUS_OFF]);
+    }
+    if (err == ESP_OK && f->resp_len < TNFS_STATUS_OFF + 2) {
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK) {
+        f->fd = f->resp[TNFS_STATUS_OFF + 1];
+    }
+    return err;
+}
+
+/*
+ * The session or socket is gone (a server reaped the session, restarted, or the TCP
+ * stream broke): MOUNT and OPEN again over the same transport. The old session gets no
+ * UMOUNT; the server reaps it. The file size is kept.
+ */
+static esp_err_t tnfs_reconnect(tnfs_file_t *f)
+{
+    if (f->sock >= 0) {
+        close(f->sock);
+        f->sock = -1;
+    }
+    f->pos_valid = false;
+    esp_err_t err = tnfs_try(f, f->host, f->port, f->tcp);
+    if (err == ESP_OK) {
+        err = tnfs_open_path(f, f->flags);
+        if (err != ESP_OK) {
+            close(f->sock);
+            f->sock = -1;
+        }
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "reconnected %s:%u%s (new session, fd %u)", f->host, f->port,
+                 f->path, f->fd);
+    } else {
+        ESP_LOGW(TAG, "reconnect %s:%u%s failed: %s", f->host, f->port, f->path,
+                 esp_err_to_name(err));
+    }
+    return err;
+}
+
 /* LSEEK to the end of the file to learn its size (fixed-length reply). */
 static esp_err_t tnfs_query_size(tnfs_file_t *f)
 {
@@ -412,6 +479,10 @@ esp_err_t tnfs_open(const char *url, bool writable, bool create, tnfs_file_t **o
     if (!f) {
         return ESP_ERR_NO_MEM;
     }
+    f->sock = -1;
+    strlcpy(f->host, host, sizeof f->host);
+    f->port = port;
+    strlcpy(f->path, path, sizeof f->path);
 
     /* UDP is the default; fall back to TCP (some servers only answer over TCP). */
     if (tnfs_try(f, host, port, false) != ESP_OK &&
@@ -424,22 +495,8 @@ esp_err_t tnfs_open(const char *url, bool writable, bool create, tnfs_file_t **o
     /* OPEN the path. */
     uint16_t flags = create ? (uint16_t)(TNFS_O_WRONLY | TNFS_O_CREAT | TNFS_O_TRUNC)
                             : (writable ? TNFS_O_RDWR : TNFS_O_RDONLY);
-    size_t path_len = strlen(path) + 1;
-    if (4 + path_len > sizeof f->req - TNFS_HDR_LEN) {
-        goto fail_open;
-    }
-    wr16(&f->req[TNFS_HDR_LEN + 0], flags);
-    wr16(&f->req[TNFS_HDR_LEN + 2], 0x01A4); /* mode 0644 for a created file */
-    memcpy(&f->req[TNFS_HDR_LEN + 4], path, path_len);
-
-    err = tnfs_command(f, TNFS_OPEN, 4 + path_len);
-    if (err == ESP_OK) {
-        err = status_err(f->resp[TNFS_STATUS_OFF]);
-    }
-    if (err != ESP_OK || f->resp_len < TNFS_STATUS_OFF + 2) {
-        if (err == ESP_OK) {
-            err = ESP_FAIL;
-        }
+    err = tnfs_open_path(f, flags);
+    if (err != ESP_OK) {
         /* Say which mode was requested and why it failed — a read-write OPEN that a
          * read-only server rejects is the expected fallback path (see disk.c mount),
          * so the mode + reason are what distinguish it from a genuine failure. */
@@ -452,7 +509,8 @@ esp_err_t tnfs_open(const char *url, bool writable, bool create, tnfs_file_t **o
         }
         goto fail_open;
     }
-    f->fd = f->resp[TNFS_STATUS_OFF + 1];
+    /* A reopen after a lost session must not create or truncate the file again. */
+    f->flags = (uint16_t)(flags & ~(TNFS_O_CREAT | TNFS_O_TRUNC));
 
     /* Size from LSEEK(SEEK_END); 0 for a just-created file. */
     f->size = 0;
@@ -500,42 +558,93 @@ static esp_err_t tnfs_seek(tnfs_file_t *f, uint32_t off)
     return ESP_OK;
 }
 
+/* One READ of up to TNFS_IO_CHUNK bytes at `off` into dst; *got = bytes read. */
+static esp_err_t read_chunk(tnfs_file_t *f, uint32_t off, uint8_t *dst, uint16_t want,
+                            uint16_t *got)
+{
+    esp_err_t err = tnfs_seek(f, off);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t *pl = &f->req[TNFS_HDR_LEN];
+    pl[0] = f->fd;
+    wr16(&pl[1], want);
+
+    err = tnfs_command(f, TNFS_READ, 3);
+    if (err != ESP_OK) {
+        f->pos_valid = false;
+        return err;
+    }
+    uint8_t status = f->resp[TNFS_STATUS_OFF];
+    if ((status != TNFS_OK && status != TNFS_EOF) || f->resp_len < TNFS_STATUS_OFF + 3) {
+        f->pos_valid = false;
+        return ESP_FAIL;
+    }
+    uint16_t n = rd16(&f->resp[TNFS_STATUS_OFF + 1]);
+    if (n == 0 || n > want || f->resp_len < (size_t)(TNFS_STATUS_OFF + 3 + n)) {
+        f->pos_valid = false;
+        return ESP_FAIL; /* short read: caller asked within bounds */
+    }
+    memcpy(dst, &f->resp[TNFS_STATUS_OFF + 3], n);
+    f->pos += n;
+    *got = n;
+    return ESP_OK;
+}
+
+/* One WRITE of up to TNFS_IO_CHUNK bytes from src at `off`; *put = bytes written. */
+static esp_err_t write_chunk(tnfs_file_t *f, uint32_t off, const uint8_t *src,
+                             uint16_t want, uint16_t *put)
+{
+    esp_err_t err = tnfs_seek(f, off);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint8_t *pl = &f->req[TNFS_HDR_LEN];
+    pl[0] = f->fd;
+    wr16(&pl[1], want);
+    memcpy(&pl[3], src, want);
+
+    err = tnfs_command(f, TNFS_WRITE, (size_t)(3 + want));
+    if (err != ESP_OK) {
+        f->pos_valid = false;
+        return err;
+    }
+    if (f->resp[TNFS_STATUS_OFF] != TNFS_OK || f->resp_len < TNFS_STATUS_OFF + 3) {
+        f->pos_valid = false;
+        return ESP_FAIL;
+    }
+    uint16_t n = rd16(&f->resp[TNFS_STATUS_OFF + 1]);
+    if (n == 0 || n > want) {
+        f->pos_valid = false;
+        return ESP_FAIL;
+    }
+    f->pos += n;
+    *put = n;
+    return ESP_OK;
+}
+
 esp_err_t tnfs_read_at(tnfs_file_t *f, uint32_t off, void *buf, size_t len)
 {
     if (!f || !buf) {
         return ESP_ERR_INVALID_ARG;
     }
     uint8_t *dst = buf;
+    bool reconnected = false;
     while (len > 0) {
-        esp_err_t err = tnfs_seek(f, off);
-        if (err != ESP_OK) {
-            return err;
-        }
         uint16_t want = (len > TNFS_IO_CHUNK) ? TNFS_IO_CHUNK : (uint16_t)len;
-        uint8_t *pl = &f->req[TNFS_HDR_LEN];
-        pl[0] = f->fd;
-        wr16(&pl[1], want);
-
-        err = tnfs_command(f, TNFS_READ, 3);
+        uint16_t got = 0;
+        esp_err_t err = read_chunk(f, off, dst, want, &got);
         if (err != ESP_OK) {
-            f->pos_valid = false;
-            return err;
+            /* Maybe the session is gone: one new session per call, then repeat. */
+            if (reconnected || tnfs_reconnect(f) != ESP_OK) {
+                return err;
+            }
+            reconnected = true;
+            continue;
         }
-        uint8_t status = f->resp[TNFS_STATUS_OFF];
-        if ((status != TNFS_OK && status != TNFS_EOF) || f->resp_len < TNFS_STATUS_OFF + 3) {
-            f->pos_valid = false;
-            return ESP_FAIL;
-        }
-        uint16_t got = rd16(&f->resp[TNFS_STATUS_OFF + 1]);
-        if (got == 0 || got > want || f->resp_len < (size_t)(TNFS_STATUS_OFF + 3 + got)) {
-            f->pos_valid = false;
-            return ESP_FAIL; /* short read: caller asked within bounds */
-        }
-        memcpy(dst, &f->resp[TNFS_STATUS_OFF + 3], got);
         dst += got;
         off += got;
         len -= got;
-        f->pos += got;
     }
     return ESP_OK;
 }
@@ -546,35 +655,22 @@ esp_err_t tnfs_write_at(tnfs_file_t *f, uint32_t off, const void *buf, size_t le
         return ESP_ERR_INVALID_ARG;
     }
     const uint8_t *src = buf;
+    bool reconnected = false;
     while (len > 0) {
-        esp_err_t err = tnfs_seek(f, off);
-        if (err != ESP_OK) {
-            return err;
-        }
         uint16_t want = (len > TNFS_IO_CHUNK) ? TNFS_IO_CHUNK : (uint16_t)len;
-        uint8_t *pl = &f->req[TNFS_HDR_LEN];
-        pl[0] = f->fd;
-        wr16(&pl[1], want);
-        memcpy(&pl[3], src, want);
-
-        err = tnfs_command(f, TNFS_WRITE, (size_t)(3 + want));
+        uint16_t put = 0;
+        esp_err_t err = write_chunk(f, off, src, want, &put);
         if (err != ESP_OK) {
-            f->pos_valid = false;
-            return err;
-        }
-        if (f->resp[TNFS_STATUS_OFF] != TNFS_OK || f->resp_len < TNFS_STATUS_OFF + 3) {
-            f->pos_valid = false;
-            return ESP_FAIL;
-        }
-        uint16_t put = rd16(&f->resp[TNFS_STATUS_OFF + 1]);
-        if (put == 0 || put > want) {
-            f->pos_valid = false;
-            return ESP_FAIL;
+            /* Maybe the session is gone: one new session per call, then repeat. */
+            if (reconnected || tnfs_reconnect(f) != ESP_OK) {
+                return err;
+            }
+            reconnected = true;
+            continue;
         }
         src += put;
         off += put;
         len -= put;
-        f->pos += put;
         if (off > f->size) {
             f->size = off;
         }
@@ -587,11 +683,13 @@ void tnfs_close(tnfs_file_t *f)
     if (!f) {
         return;
     }
-    uint8_t *pl = &f->req[TNFS_HDR_LEN];
-    pl[0] = f->fd;
-    tnfs_command(f, TNFS_CLOSE, 1);
-    tnfs_command(f, TNFS_UMOUNT, 0);
-    close(f->sock);
+    if (f->sock >= 0) {
+        uint8_t *pl = &f->req[TNFS_HDR_LEN];
+        pl[0] = f->fd;
+        tnfs_command(f, TNFS_CLOSE, 1);
+        tnfs_command(f, TNFS_UMOUNT, 0);
+        close(f->sock);
+    }
     free(f);
 }
 
