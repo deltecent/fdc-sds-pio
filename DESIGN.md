@@ -710,11 +710,15 @@ A Python client to test this server with is `deltecent/de-tnfs`
 - **Sessions & handles — [RESOLVED: bounds].** One UDP socket; clients are distinguished by
   source address + the session id the server allocates in the `MOUNT` reply. Bounds are
   small (this is a staging tool, not a fileserver): **≤2 concurrent sessions**, and per
-  session **≤4 open files + ≤2 open directories**. A session is reaped after a fixed
-  **idle timeout of ≈30 s** so a client that quits without `UMOUNT` can't leak handles;
-  reaping closes any files it left open. (The `MOUNT` reply advertises a min-retry
-  timeout *to* the client; the request carries no timeout of its own.) `MOUNT` over the
-  session cap is refused with a busy/again status.
+  session **≤4 open files + ≤2 open directories**. A session is reaped after **10 min
+  idle** (the reference tnfsd's value) so a client that quits without `UMOUNT` can't
+  leak handles; reaping closes any files it left open. (The `MOUNT` reply advertises a
+  min-retry timeout *to* the client; the request carries no timeout of its own.) A
+  `MOUNT` with every slot taken takes over the session idle longest if it has been idle
+  ≥ 30 s; otherwise it is refused with a busy/again status. A request for an unknown
+  session id gets status `EBADSESSION` (0xFF, as tnfsd), so a client learns at once
+  that it must `MOUNT` again. (This was ≈30 s with no reply, which hung a client that
+  didn't re-mount: issue #7.)
 - **Idempotent retransmit handling — the key risk [CLAUDE — called out, to validate].**
   TNFS is sequence-numbered datagrams: the client retransmits the *same* request (same
   sequence byte) when a reply is lost. The server must therefore **cache each session's
