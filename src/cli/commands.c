@@ -791,7 +791,7 @@ static int cmd_dump(cli_console_t *c, int argc, char **argv)
         }
         track = (argc > 2) ? (uint32_t)strtoul(argv[2], NULL, 0) : 0;
         len = (argc > 3) ? (size_t)strtoul(argv[3], NULL, 0) : DUMP_DEFAULT_LEN;
-        esp_err_t err = disk_read_track(drive, track, len, buf);
+        esp_err_t err = disk_read_track(drive, track, len, buf, DISK_REMOTE_WAIT_MS);
         if (err != ESP_OK) {
             cli_printf(c, "dump: read failed: %s\r\n", esp_err_to_name(err));
             free(buf);
@@ -804,7 +804,7 @@ static int cmd_dump(cli_console_t *c, int argc, char **argv)
             drive = 0;
             track = 0;
             len = DUMP_DEFAULT_LEN;
-            if (disk_read_track(drive, track, len, buf) != ESP_OK) {
+            if (disk_read_track(drive, track, len, buf, DISK_REMOTE_WAIT_MS) != ESP_OK) {
                 cli_write(c, "dump: no track loaded (mount a drive first)\r\n");
                 free(buf);
                 return 1;
@@ -1263,6 +1263,8 @@ static int cmd_stats(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "  %-10s%lu\r\n", "READ",     (unsigned long)s.read);
     cli_printf(c, "  %-10s%lu\r\n", "WRIT",     (unsigned long)s.writ);
     cli_printf(c, "  %-10s%lu\r\n", "not-rdy",  (unsigned long)s.not_ready);
+    cli_printf(c, "  %-10s%-6lu(remote track not ready within 1 s; FDC retries)\r\n",
+               "late", (unsigned long)s.late);
     cli_printf(c, "  %-10s%-6lu(bad command header from FDC)\r\n",
                "cmd-csum", (unsigned long)s.cmd_csum);
     cli_printf(c, "  %-10s%-6lu(bad WRIT track data from FDC)\r\n",
@@ -2030,9 +2032,10 @@ static int cmd_diag(cli_console_t *c, int argc, char **argv)
     cli_printf(c, "TCP:       %lu connects, %lu disconnects, %lu refused\r\n",
                (unsigned long)s.tcp_connects, (unsigned long)s.tcp_disconnects,
                (unsigned long)s.tcp_refused);
-    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  not-rdy %lu  unknown %lu\r\n",
+    cli_printf(c, "STAT %lu  READ %lu  WRIT %lu  not-rdy %lu  late %lu  unknown %lu\r\n",
                (unsigned long)s.stat, (unsigned long)s.read, (unsigned long)s.writ,
-               (unsigned long)s.not_ready, (unsigned long)s.unknown);
+               (unsigned long)s.not_ready, (unsigned long)s.late,
+               (unsigned long)s.unknown);
     cli_printf(c, "cmd-csum %lu  data-csum %lu  cmd-tmo %lu  data-tmo %lu  "
                   "fifo-ovf %lu  frame-err %lu\r\n",
                (unsigned long)s.cmd_csum, (unsigned long)s.data_csum,
