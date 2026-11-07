@@ -80,6 +80,7 @@
 #define TNFS_ENOSYS       0x16  /* function not implemented */
 #define TNFS_ENOTEMPTY    0x17  /* directory not empty */
 #define TNFS_EOF          0x21  /* end of file (READ past the end) */
+#define TNFS_EBADSESSION  0xFF  /* unknown session id (reference tnfsd value) */
 
 /* ---- LSEEK whence ---------------------------------------------------------- */
 

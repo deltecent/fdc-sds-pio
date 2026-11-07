@@ -663,6 +663,11 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
   glue API (per §5.3) exposing exactly what callers need: `open`, `size`, `read_at`,
   `write_at`, `close`. One session per mounted remote drive; a transient session for a
   `copy`.
+- **Lost sessions (issue #7).** A server can drop a session at any time (idle reaping,
+  a restart). When a `read_at`/`write_at` chunk fails (no reply, `EBADSESSION`, or any
+  error status), the client opens a new session (`MOUNT` + `OPEN` over the same
+  transport, without `CREAT`/`TRUNC`) and repeats the chunk, once per call. Repeating a
+  positioned read or write of the same bytes is safe.
 - **Off the `fdc` task.** lwIP/WiFi live on core 0; the `fdc` task is pinned to core 1
   and must never block on the network (§5.2). Remote track I/O is serviced on the
   `net`/CLI side, not inline on `fdc` — see §10.1 for dispatch and timeout bounding.
