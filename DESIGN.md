@@ -279,7 +279,11 @@ Command     Word 1             Word 2             Checksum
 **Response codes:** `0 OK`, `1 Not Ready`, `2 Checksum error`, `3 Write error`.
 
 ### 6.4 Error recovery
-- ~1 s FDC timeout after last byte determines a dropped transaction.
+- ~1 s FDC timeout after last byte determines a dropped transaction. The FDC+ starts
+  one timer and does not restart it per byte, so the **whole reply** (a READ's track +
+  checksum, a `WSTA`) must arrive within 1 s of the last byte of the command or data
+  block. The server's own receive timeouts below do not extend that window. A reply
+  that would miss it must not be sent (§10.1).
 - Ignore commands with a bad checksum (FDC retries). Bad checksum on **write data** →
   return `WRIT` response code `2` (do not silently ignore).
 - Maintain per-call receive timeouts (e.g. ~1 s for a command block, ~7 s for a data
@@ -314,8 +318,8 @@ buffer is sized with headroom above this (§6.6).
   FDC+ never asks for an 8192-byte transfer — the 8 MB image is 2048 tracks of 4384
   bytes (§6.5), and its byte offset is `track * len` with a `len` of 4384. So
   the **≥ 8192-byte buffer is deliberate headroom**, and a worst-case remote READ is
-  ~4384 B ≈ 5 TNFS datagrams + a seek (~6 round trips, ~0.3 s over WAN) — comfortably
-  inside the 7 s data timeout (§10.1).
+  ~4384 B ≈ 5 TNFS datagrams + a seek (~6 round trips, ~0.3 s over WAN). That must fit,
+  with the send time, inside the FDC+'s 1 s reply window (§6.4, §10.1).
 
 ### 6.7 LEDs
 - Status LED (built-in): on when a valid command is received; a hardware/`esp_timer`
@@ -659,6 +663,11 @@ two features: mounting a drive from a remote image (§10.1) and `copy` to/from t
   glue API (per §5.3) exposing exactly what callers need: `open`, `size`, `read_at`,
   `write_at`, `close`. One session per mounted remote drive; a transient session for a
   `copy`.
+- **Lost sessions (issue #7).** A server can drop a session at any time (idle reaping,
+  a restart). When a `read_at`/`write_at` chunk fails (no reply, `EBADSESSION`, or any
+  error status), the client opens a new session (`MOUNT` + `OPEN` over the same
+  transport, without `CREAT`/`TRUNC`) and repeats the chunk, once per call. Repeating a
+  positioned read or write of the same bytes is safe.
 - **Off the `fdc` task.** lwIP/WiFi live on core 0; the `fdc` task is pinned to core 1
   and must never block on the network (§5.2). Remote track I/O is serviced on the
   `net`/CLI side, not inline on `fdc` — see §10.1 for dispatch and timeout bounding.
@@ -701,11 +710,15 @@ A Python client to test this server with is `deltecent/de-tnfs`
 - **Sessions & handles — [RESOLVED: bounds].** One UDP socket; clients are distinguished by
   source address + the session id the server allocates in the `MOUNT` reply. Bounds are
   small (this is a staging tool, not a fileserver): **≤2 concurrent sessions**, and per
-  session **≤4 open files + ≤2 open directories**. A session is reaped after a fixed
-  **idle timeout of ≈30 s** so a client that quits without `UMOUNT` can't leak handles;
-  reaping closes any files it left open. (The `MOUNT` reply advertises a min-retry
-  timeout *to* the client; the request carries no timeout of its own.) `MOUNT` over the
-  session cap is refused with a busy/again status.
+  session **≤4 open files + ≤2 open directories**. A session is reaped after **10 min
+  idle** (the reference tnfsd's value) so a client that quits without `UMOUNT` can't
+  leak handles; reaping closes any files it left open. (The `MOUNT` reply advertises a
+  min-retry timeout *to* the client; the request carries no timeout of its own.) A
+  `MOUNT` with every slot taken takes over the session idle longest if it has been idle
+  ≥ 30 s; otherwise it is refused with a busy/again status. A request for an unknown
+  session id gets status `EBADSESSION` (0xFF, as tnfsd), so a client learns at once
+  that it must `MOUNT` again. (This was ≈30 s with no reply, which hung a client that
+  didn't re-mount: issue #7.)
 - **Idempotent retransmit handling — the key risk [CLAUDE — called out, to validate].**
   TNFS is sequence-numbered datagrams: the client retransmits the *same* request (same
   sequence byte) when a reply is lost. The server must therefore **cache each session's
@@ -858,21 +871,34 @@ only the *backing* differs.
   TNFS datagrams (per-read payload is capped), each a WiFi round trip; a blocking remote
   read can approach or exceed the FDC command timeout, and it must **not** run on the
   core-1 `fdc` task (§9.5 / §5.2). Mitigations to build and measure: keep the 1-entry
-  track cache warm with **read-ahead**; service remote I/O on core 0 while the FDC path
-  waits under its longer *data* timeout (~7 s, §6.4) rather than the 1 s command timeout;
-  treat TNFS as **best-effort** — the owner may need a lower baud for remote drives.
+  track cache warm with **read-ahead**; service remote I/O on core 0; treat TNFS as
+  **best-effort** — the owner may need a lower baud for remote drives. (An earlier draft
+  had the FDC path wait under the 7 s *data* timeout. That timeout is the server's own;
+  the FDC+ allows 1 s for the whole reply, §6.4. See the reply deadline below.)
   Validate timing on real hardware before declaring TNFS done (plan gate).
   - **[CLAUDE — resolved during M9b: dispatch model].** A dedicated **disk-I/O worker
     task pinned to core 0** owns every TNFS session and performs all remote
     read/write/mount/close. `disk_read_track`/`disk_write_track` detect a remote drive,
     hand the operation to the worker and **block the caller** (the fdc task) on a
-    completion semaphore under a ~6 s bound (< the 7 s data timeout); a caller that times
-    out early hands the job to the worker to finish and free (so an abandoned read still
-    warms the cache for the FDC's retry). The SD mutex is **not** held across a remote
+    completion semaphore; a caller that times out early hands the job to the worker to
+    finish and free (so an abandoned read still warms the cache for the FDC's retry). The SD mutex is **not** held across a remote
     round trip — the worker copies the fetched track into the shared buffer under the lock
     only after the network I/O completes. Local track I/O is unchanged: inline under the
     mutex. Read-ahead beyond the 1-entry cache is deferred until on-hardware measurement
     shows it is needed.
+  - **Reply deadline (issue #8).** The fdc task waits for a remote job only as long as
+    the reply can still reach the FDC+ inside its 1 s window (§6.4): 1000 ms, less a
+    100 ms margin, less the time since the last byte of the command (READ) or the data
+    block (`WSTA`), less the time to send the reply at the current baud (a 4384-byte
+    track takes ~109 ms at 403.2K, ~380 ms at 115.2K; taken as 0 over fdctcp). If the
+    job isn't done by then, or the FDC+ has already sent its retry, the server sends
+    **no reply** and counts it as `late` in `stats`. The job runs on:
+    - A late READ fills the cache, so the retry is answered from it. The worker checks
+      the cache before any network I/O, so a retry queued behind its late first attempt
+      doesn't fetch the track a second time.
+    - A late WRIT still writes to the server. When the FDC+ retries it with the same
+      data and the cache shows the server already holds that data, the server returns
+      `WSTA` OK without a round trip, both in the fdc path and in the worker.
 - **Read-only option.** Default **read-write** to match SD; allow a mount to be flagged
   read-only (WRIT → `Not Ready`) for servers the owner does not want written.
   - **[CLAUDE — resolved during M9b].** Read-only is derived, not configured: a remote

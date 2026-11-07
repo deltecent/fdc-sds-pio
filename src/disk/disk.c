@@ -14,8 +14,9 @@
  * Remote I/O must never run on the core-1 `fdc` task (§5.2/§9.5): the fdc path must not
  * block on the network. So a dedicated **disk-I/O worker task** on core 0 owns every
  * TNFS session and performs every remote read/write/mount/close; the calling task (fdc,
- * or the CLI) hands off a job and waits under the FDC ~7 s data timeout while the worker
- * does the round trips. Local track I/O still runs inline under the mutex (fast SD).
+ * or the CLI) hands off a job and waits, at most as long as its caller allows (for the
+ * fdc task, what is left of the FDC+'s 1 s reply window, §10.1), while the worker does
+ * the round trips. Local track I/O still runs inline under the mutex (fast SD).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -219,6 +220,13 @@ static inline bool drive_ok(int drive)
 static inline void lock(void)   { xSemaphoreTake(s_lock, portMAX_DELAY); }
 static inline void unlock(void) { xSemaphoreGive(s_lock); }
 
+/* True if the cache holds exactly (drive, track, len). Caller holds the lock. */
+static bool cache_holds(int drive, uint32_t track, size_t len)
+{
+    return s_cache.valid && s_cache.drive == drive && s_cache.track == track &&
+           s_cache.len == len;
+}
+
 /* Drop the shared-buffer cache if it refers to `drive` (called on unmount/remount). */
 static void cache_drop_drive(int drive)
 {
@@ -252,7 +260,6 @@ typedef struct {
 
 #define REMOTE_QUEUE_LEN    12
 #define REMOTE_QSEND_MS     1000   /* wait to enqueue a job */
-#define REMOTE_OP_WAIT_MS   6000   /* fdc read/write wait (< 7 s host data timeout) */
 #define REMOTE_MOUNT_WAIT_MS 12000 /* CLI mount wait (UDP probe + TCP connect + OPEN) */
 #define REMOTE_WORKER_STACK 6144
 
@@ -289,6 +296,15 @@ static void worker_read(rjob_t *j)
 {
     disk_backing_t *b = NULL;
     lock();
+    /* A READ whose caller gave up leaves its job running, and the FDC's retry queues a
+     * second job for the same track behind it. Once the first fills the cache the
+     * second must not go back to the network, or it misses its deadline too. */
+    if (drive_ok(j->drive) && s_drv[j->drive].mounted &&
+        cache_holds(j->drive, j->track, j->len)) {
+        unlock();
+        rjob_complete(j, ESP_OK);
+        return;
+    }
     if (drive_ok(j->drive) && s_drv[j->drive].mounted && s_drv[j->drive].remote &&
         s_drv[j->drive].backing) {
         uint32_t size = s_drv[j->drive].backing->size(s_drv[j->drive].backing);
@@ -325,6 +341,15 @@ static void worker_write(rjob_t *j)
 {
     disk_backing_t *b = NULL;
     lock();
+    /* Same as worker_read: a retried WRIT queued behind its late first attempt finds
+     * the data already on the server once that attempt completes. */
+    if (drive_ok(j->drive) && s_drv[j->drive].mounted &&
+        cache_holds(j->drive, j->track, j->len) &&
+        memcmp(s_track_buf, j->wdata, j->len) == 0) {
+        unlock();
+        rjob_complete(j, ESP_OK);
+        return;
+    }
     if (drive_ok(j->drive) && s_drv[j->drive].mounted && s_drv[j->drive].remote &&
         !s_drv[j->drive].readonly && s_drv[j->drive].backing) {
         uint32_t size = s_drv[j->drive].backing->size(s_drv[j->drive].backing);
@@ -497,8 +522,9 @@ static esp_err_t rjob_post_async(rjob_t *j)
     return ESP_OK;
 }
 
-/* Post a job and wait up to wait_ms for it; returns the job's result. Hands the job to
- * the worker to free if the wait times out (see rjob_complete). */
+/* Post a job and wait up to wait_ms in all (queueing included) for it; returns the
+ * job's result, or ESP_ERR_NOT_FINISHED if the wait expired first. The job then still
+ * runs, and the worker frees it (see rjob_complete). */
 static esp_err_t rjob_post_wait(rjob_t *j, uint32_t wait_ms)
 {
     if (!j) {
@@ -513,19 +539,23 @@ static esp_err_t rjob_post_wait(rjob_t *j, uint32_t wait_ms)
         rjob_free(j);
         return ESP_ERR_NO_MEM;
     }
-    if (xQueueSend(s_rq, &j, pdMS_TO_TICKS(REMOTE_QSEND_MS)) != pdTRUE) {
+    TickType_t t0 = xTaskGetTickCount();
+    uint32_t qwait = (wait_ms < REMOTE_QSEND_MS) ? wait_ms : REMOTE_QSEND_MS;
+    if (xQueueSend(s_rq, &j, pdMS_TO_TICKS(qwait)) != pdTRUE) {
         rjob_free(j);
         return ESP_ERR_TIMEOUT;
     }
+    uint32_t spent_ms = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t0);
+    uint32_t left = (spent_ms >= wait_ms) ? 0 : wait_ms - spent_ms;
 
-    if (xSemaphoreTake(j->done, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
+    if (xSemaphoreTake(j->done, pdMS_TO_TICKS(left)) == pdTRUE) {
         esp_err_t r = j->result;
         rjob_free(j);
         return r;
     }
     /* Timed out. Either the worker just finished (we own the free) or it is still
      * running (mark abandoned; the worker frees it). */
-    esp_err_t r = ESP_ERR_TIMEOUT;
+    esp_err_t r = ESP_ERR_NOT_FINISHED;
     xSemaphoreTake(s_job_mtx, portMAX_DELAY);
     if (j->completed) {
         r = j->result;
@@ -628,7 +658,8 @@ static esp_err_t remote_configure(int drive, const char *url)
     if (!j) {
         return ESP_ERR_NO_MEM;
     }
-    return rjob_post_wait(j, REMOTE_MOUNT_WAIT_MS);
+    esp_err_t err = rjob_post_wait(j, REMOTE_MOUNT_WAIT_MS);
+    return (err == ESP_ERR_NOT_FINISHED) ? ESP_ERR_TIMEOUT : err;
 }
 
 esp_err_t disk_mount(int drive, const char *name)
@@ -821,15 +852,15 @@ static esp_err_t check_track(int drive, uint32_t track, size_t len)
  * while another (the CLI, a late remote job) fills it. */
 static bool cache_copy_out(int drive, uint32_t track, size_t len, void *dst)
 {
-    if (s_cache.valid && s_cache.drive == drive && s_cache.track == track &&
-        s_cache.len == len) {
+    if (cache_holds(drive, track, len)) {
         memcpy(dst, s_track_buf, len);
         return true;
     }
     return false;
 }
 
-esp_err_t disk_read_track(int drive, uint32_t track, size_t len, void *dst)
+esp_err_t disk_read_track(int drive, uint32_t track, size_t len, void *dst,
+                          uint32_t remote_wait_ms)
 {
     if (!s_lock || !dst) {
         return ESP_ERR_INVALID_STATE;
@@ -854,7 +885,7 @@ esp_err_t disk_read_track(int drive, uint32_t track, size_t len, void *dst)
     if (s_drv[drive].remote) {
         unlock();
         err = rjob_post_wait(rjob_new_io(RJOB_READ, drive, track, len, NULL),
-                             REMOTE_OP_WAIT_MS);
+                             remote_wait_ms);
         if (err == ESP_OK) {
             lock();
             if (!cache_copy_out(drive, track, len, dst)) {
@@ -881,7 +912,8 @@ esp_err_t disk_read_track(int drive, uint32_t track, size_t len, void *dst)
     return err;
 }
 
-esp_err_t disk_write_track(int drive, uint32_t track, size_t len, const void *data)
+esp_err_t disk_write_track(int drive, uint32_t track, size_t len, const void *data,
+                           uint32_t remote_wait_ms)
 {
     if (!s_lock || !data) {
         return ESP_ERR_INVALID_STATE;
@@ -898,9 +930,15 @@ esp_err_t disk_write_track(int drive, uint32_t track, size_t len, const void *da
     }
 
     if (s_drv[drive].remote) {
+        /* The server already holds this data (a retry of a WRIT that finished after
+         * the FDC+ stopped waiting for its WSTA): nothing to send. */
+        bool done = cache_holds(drive, track, len) && memcmp(s_track_buf, data, len) == 0;
         unlock();
+        if (done) {
+            return ESP_OK;
+        }
         return rjob_post_wait(rjob_new_io(RJOB_WRITE, drive, track, len, data),
-                              REMOTE_OP_WAIT_MS);
+                              remote_wait_ms);
     }
 
     disk_backing_t *b = s_drv[drive].backing;

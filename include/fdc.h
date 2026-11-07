@@ -48,6 +48,7 @@ typedef struct {
     uint32_t read;         /* READ commands that returned track data */
     uint32_t writ;         /* WRIT commands accepted (data received, WSTA sent) */
     uint32_t not_ready;    /* READ/WRIT to an unmounted / out-of-range drive, or write error */
+    uint32_t late;         /* remote READ/WRIT not done inside the FDC+'s 1 s window: no reply */
     uint32_t cmd_csum;     /* bad checksum on a 10-byte command block (header from FDC) */
     uint32_t data_csum;    /* bad checksum on WRIT track data (payload from FDC) -> WSTA 2 */
     uint32_t cmd_timeout;  /* command block truncated before the 10 bytes arrived */
