@@ -7,6 +7,36 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Versioning starts fresh at 1.0.0 for this from-scratch ESP-IDF rewrite; the old Arduino
 firmware ended at 0.25.
 
+## [1.0.8] - 2026-11-08
+
+### Added
+
+- A `late` count in `stats` and `diag`: remote (`tnfs://`) READ and WRIT replies held
+  back because the track was not ready in time. The FDC+ retries them. (#8)
+
+### Fixed
+
+- **A slow remote track no longer corrupts the FDC+ link.** The FDC+ allows 1 s from its
+  last byte for the whole reply, but a remote READ could wait up to 7 s and then send the
+  track anyway, after the FDC+ had given up. The late track was taken as the reply to the
+  next command, which led to "Bad Sector" errors and could put a wrong track into the
+  FDC+'s buffer. A remote READ or WRIT now waits only for what is left of the 1 s window,
+  less the time to send the reply at the current baud. If the track is not ready by then,
+  or the FDC+ has already sent its retry, nothing is sent; the I/O finishes in the
+  background and the retry is answered from the track cache, without a second trip to the
+  server. A retried WRIT of data the server already holds gets WSTA OK at once. (#8)
+- **A remote drive recovers when the server drops its session.** After a TNFS server
+  forgot the session (an idle timeout or a restart), every READ and WRIT on that drive
+  failed until the drive was mounted again. The client now mounts and opens the image
+  again, on the same transport, when a request fails, and repeats that part of the
+  transfer. (#7)
+- **The TNFS server keeps idle sessions for 10 minutes and answers unknown ones.** The SDS
+  TNFS server dropped a session after 30 s idle, then ignored its requests without a
+  reply. It now keeps idle sessions for 10 minutes, as the reference tnfsd does, and
+  answers a request for an unknown session with `EBADSESSION` (0xFF) so the client can
+  reconnect at once. When both session slots are full, a new mount takes over the one
+  idle longest, if it has been idle for at least 30 s. (#7)
+
 ## [1.0.7] - 2026-11-06
 
 ### Added
