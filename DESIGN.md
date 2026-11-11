@@ -237,8 +237,17 @@ Authoritative spec: `docs/FDC Serial Server Protocol.txt` (from deramp.com). Sum
 
 ### 6.1 Link
 - **8N1**, baud rate configurable. Supported: `9600, 19200, 38400, 57600, 76800,
-  115200, 230400, 403200, 460800`. Default **403200** (best accuracy + full speed).
-  `460800` works but ~3.5% off; `230400` is common and runs ~80–90% disk speed.
+  230400, 403200, 460800` (the FDC+'s own rates; 115200 is not one). Default
+  **403200** (best accuracy + full speed). `460800` works but ~3.5% off; `230400` is
+  common and runs ~80–90% disk speed.
+- **`baud auto`** finds the FDC+'s rate. It tries the current rate, then 403200, then
+  the rest from fastest to slowest. At each rate it waits for the fdc task to switch,
+  then listens ~0.7 s. It keeps the first rate where ≥ 2 commands arrive with a valid
+  checksum and a known mnemonic (STAT/READ/WRIT). Any valid command counts, because
+  CP/M and FLEX drivers don't send STAT (§6.7). Like `baud <rate>`, the result is set
+  live and saved only by `save`. With no valid traffic at any rate, the original rate
+  is restored. The scan needs the FDC+ to be talking (Altair running, serial mode),
+  and it refuses while an FDC-over-TCP client holds the link (§9.7).
 - All transactions are FDC-initiated; the server is a passive responder.
 - Multi-byte words are **little-endian**.
 - Setting baud may require a UART stop/restart (or explicit divisor set) at these high
@@ -405,7 +414,7 @@ byte ever leaks into a command line.
 | Command (aliases) | Args | Description |
 |---|---|---|
 | `help` / `?` | — | Command help |
-| `baud` | rate | Set FDC+ baud rate |
+| `baud` | rate \| `auto` | Set FDC+ baud rate, or scan for the FDC+'s rate (§6.1) |
 | `dir` / `ls` | — \| spec | List SD root (name + size; hide dotfiles); optional glob `spec` filters (e.g. `*.BAT`, §8.4) |
 | `mount` | — \| drive file\|url | Show mount table / mount on drive 0–3: SD file **or** `tnfs://` URL (§10.1) |
 | `unmount` / `umount` | drive | Unmount a drive |
