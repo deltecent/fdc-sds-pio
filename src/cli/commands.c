@@ -98,7 +98,10 @@ static const char D_baud[] =
     "which is unaffected. The FDC+ S-100 board must be set to the same rate or the\r\n"
     "two cannot talk. A new rate applies immediately; run 'save' to keep it across\r\n"
     "reboots.\r\n"
-    "usage: baud [<rate>]        (with no rate, shows the current speed)\r\n";
+    "'baud auto' tries each rate until the FDC+'s commands arrive intact and keeps\r\n"
+    "that one (up to ~30 s). The FDC+ must be talking: the Altair running with the\r\n"
+    "FDC+ in serial mode. If nothing is found, the speed is left unchanged.\r\n"
+    "usage: baud [<rate>|auto]   (with no argument, shows the current speed)\r\n";
 static const char D_dir[] =
     "With a pattern, shows only matching files; with a subdirectory name, lists\r\n"
     "that folder; with a tnfs:// URL, lists a directory on a TNFS server.\r\n"
@@ -282,7 +285,7 @@ static const cli_command_t k_commands[] = {
 
 /* FDC+ baud rates the link supports (DESIGN.md §6.1). */
 static const uint32_t k_bauds[] = {
-    9600, 19200, 38400, 57600, 76800, 115200, 230400, 403200, 460800,
+    9600, 19200, 38400, 57600, 76800, 230400, 403200, 460800,
 };
 #define BAUD_COUNT (sizeof(k_bauds) / sizeof(k_bauds[0]))
 
@@ -1217,11 +1220,106 @@ static int cmd_hostname(cli_console_t *c, int argc, char **argv)
     return 0;
 }
 
+/* `baud auto` (DESIGN.md §6.1): how long to wait for the fdc task to switch rates, how
+ * long to listen at each rate, and how many checksum-valid commands mean "found". */
+#define BAUD_AUTO_SETTLE_MS  1500
+#define BAUD_AUTO_DWELL_MS    700
+#define BAUD_AUTO_MIN_HITS      2
+#define BAUD_DEFAULT       403200
+
+/* Commands that arrived with a valid checksum and a known mnemonic. */
+static uint32_t fdc_valid_cmds(const fdc_stats_t *s)
+{
+    return s->stat + s->read + s->writ + s->not_ready;
+}
+
+/* Try one rate: switch the link, then count valid commands over the dwell window. */
+static bool baud_auto_try(cli_console_t *c, uint32_t rate)
+{
+    fdc_set_baud(rate);
+    for (int waited = 0; fdc_baud() != rate && waited < BAUD_AUTO_SETTLE_MS; waited += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (fdc_baud() != rate) {
+        cli_printf(c, "  %7lu: link did not switch\r\n", (unsigned long)rate);
+        return false;
+    }
+
+    fdc_stats_t a, b;
+    fdc_get_stats(&a);
+    vTaskDelay(pdMS_TO_TICKS(BAUD_AUTO_DWELL_MS));
+    fdc_get_stats(&b);
+
+    uint32_t hits = fdc_valid_cmds(&b) - fdc_valid_cmds(&a);
+    uint32_t bad = (b.cmd_csum - a.cmd_csum) + (b.cmd_timeout - a.cmd_timeout) +
+                   (b.frame_err - a.frame_err) + (b.unknown - a.unknown);
+    if (hits >= BAUD_AUTO_MIN_HITS) {
+        cli_printf(c, "  %7lu: %lu valid commands\r\n", (unsigned long)rate,
+                   (unsigned long)hits);
+        return true;
+    }
+    if (hits || bad) {
+        cli_printf(c, "  %7lu: no lock (%lu valid, %lu bad)\r\n", (unsigned long)rate,
+                   (unsigned long)hits, (unsigned long)bad);
+    } else {
+        cli_printf(c, "  %7lu: no traffic\r\n", (unsigned long)rate);
+    }
+    return false;
+}
+
+/*
+ * Scan the supported rates until the FDC+'s commands arrive intact. Order: the current
+ * rate, then the default, then the rest fastest first, so that when two neighbouring
+ * rates both decode (403200 vs 460800) the more accurate one wins.
+ */
+static int baud_auto(cli_console_t *c)
+{
+    fdc_stats_t s;
+    fdc_get_stats(&s);
+    if (s.transport == FDC_XPORT_TCP) {
+        cli_write(c, "an FDC+ TCP client holds the link; the UART is ignored until it leaves\r\n");
+        return 1;
+    }
+
+    const uint32_t orig = fdc_baud();
+    uint32_t order[BAUD_COUNT + 2];
+    size_t n = 0;
+    order[n++] = orig;
+    if (orig != BAUD_DEFAULT) {
+        order[n++] = BAUD_DEFAULT;
+    }
+    for (size_t i = BAUD_COUNT; i-- > 0;) {
+        if (k_bauds[i] != orig && k_bauds[i] != BAUD_DEFAULT) {
+            order[n++] = k_bauds[i];
+        }
+    }
+
+    cli_write(c, "scanning FDC+ link rates...\r\n");
+    for (size_t i = 0; i < n; ++i) {
+        if (baud_auto_try(c, order[i])) {
+            config_set_baud(order[i]);
+            cli_printf(c, "baud set to %lu (auto); run 'save' to keep it\r\n",
+                       (unsigned long)order[i]);
+            return 0;
+        }
+    }
+
+    fdc_set_baud(orig);
+    cli_printf(c, "no FDC+ commands at any rate; left at %lu\r\n"
+                  "  (is the Altair running with the FDC+ in serial mode?)\r\n",
+               (unsigned long)orig);
+    return 1;
+}
+
 static int cmd_baud(cli_console_t *c, int argc, char **argv)
 {
     if (argc < 2) {
         cli_printf(c, "baud %lu\r\n", (unsigned long)config_get()->baud_rate);
         return 0;
+    }
+
+    if (strcasecmp(argv[1], "auto") == 0) {
+        return baud_auto(c);
     }
 
     char *end;
@@ -1241,7 +1339,7 @@ static int cmd_baud(cli_console_t *c, int argc, char **argv)
         for (size_t i = 0; i < BAUD_COUNT; ++i) {
             cli_printf(c, " %lu", (unsigned long)k_bauds[i]);
         }
-        cli_write(c, "\r\n");
+        cli_write(c, "  (or auto)\r\n");
         return 1;
     }
 
